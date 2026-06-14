@@ -30,6 +30,8 @@ pub const INTERNODE_TRANSPORT_BACKEND_UNKNOWN: &str = "unknown";
 
 const OPERATION_LABEL: &str = "operation";
 const BACKEND_LABEL: &str = "backend";
+const FROM_BACKEND_LABEL: &str = "from_backend";
+const TO_BACKEND_LABEL: &str = "to_backend";
 const CLASSIFICATION_LABEL: &str = "classification";
 const STAGE_LABEL: &str = "stage";
 const DOMINANT_ERROR_LABEL: &str = "dominant_error";
@@ -41,6 +43,7 @@ const INTERNODE_OPERATION_ERRORS_TOTAL: &str = "rustfs_system_network_internode_
 const INTERNODE_OPERATION_CLASSIFIED_ERRORS_TOTAL: &str = "rustfs_system_network_internode_operation_classified_errors_total";
 const INTERNODE_OPERATION_RETRIES_TOTAL: &str = "rustfs_system_network_internode_operation_retries_total";
 const INTERNODE_OPERATION_RETRY_SUCCESSES_TOTAL: &str = "rustfs_system_network_internode_operation_retry_successes_total";
+const INTERNODE_OPERATION_FALLBACKS_TOTAL: &str = "rustfs_system_network_internode_operation_fallbacks_total";
 const ERASURE_WRITE_QUORUM_FAILURES_TOTAL: &str = "rustfs_system_storage_erasure_write_quorum_failures_total";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub struct InternodeOperationMetricDescriptor {
 
 const OPERATION_BACKEND_LABELS: &[&str] = &[OPERATION_LABEL, BACKEND_LABEL];
 const OPERATION_BACKEND_CLASSIFICATION_LABELS: &[&str] = &[OPERATION_LABEL, BACKEND_LABEL, CLASSIFICATION_LABEL];
+const OPERATION_FALLBACK_LABELS: &[&str] = &[OPERATION_LABEL, FROM_BACKEND_LABEL, TO_BACKEND_LABEL, CLASSIFICATION_LABEL];
 const QUORUM_FAILURE_LABELS: &[&str] = &[STAGE_LABEL, DOMINANT_ERROR_LABEL];
 
 pub const INTERNODE_OPERATION_METRICS: &[InternodeOperationMetricDescriptor] = &[
@@ -87,6 +91,10 @@ pub const INTERNODE_OPERATION_METRICS: &[InternodeOperationMetricDescriptor] = &
         labels: OPERATION_BACKEND_CLASSIFICATION_LABELS,
     },
     InternodeOperationMetricDescriptor {
+        name: INTERNODE_OPERATION_FALLBACKS_TOTAL,
+        labels: OPERATION_FALLBACK_LABELS,
+    },
+    InternodeOperationMetricDescriptor {
         name: ERASURE_WRITE_QUORUM_FAILURES_TOTAL,
         labels: QUORUM_FAILURE_LABELS,
     },
@@ -99,6 +107,7 @@ pub struct InternodeMetricsSnapshot {
     pub outgoing_requests_total: u64,
     pub incoming_requests_total: u64,
     pub errors_total: u64,
+    pub fallbacks_total: u64,
     pub dial_errors_total: u64,
     pub dial_avg_time_nanos: u64,
     pub last_dial_unix_millis: u64,
@@ -111,6 +120,7 @@ pub struct InternodeMetrics {
     outgoing_requests_total: AtomicU64,
     incoming_requests_total: AtomicU64,
     errors_total: AtomicU64,
+    fallbacks_total: AtomicU64,
     dial_errors_total: AtomicU64,
     dial_total_time_nanos: AtomicU64,
     dial_samples_total: AtomicU64,
@@ -253,6 +263,24 @@ impl InternodeMetrics {
         .increment(1);
     }
 
+    pub fn record_transport_fallback_for_operation(
+        &self,
+        operation: &'static str,
+        from_backend: &'static str,
+        to_backend: &'static str,
+        classification: &'static str,
+    ) {
+        self.fallbacks_total.fetch_add(1, Ordering::Relaxed);
+        counter!(
+            INTERNODE_OPERATION_FALLBACKS_TOTAL,
+            OPERATION_LABEL => operation,
+            FROM_BACKEND_LABEL => from_backend,
+            TO_BACKEND_LABEL => to_backend,
+            CLASSIFICATION_LABEL => classification
+        )
+        .increment(1);
+    }
+
     pub fn record_erasure_write_quorum_failure(&self, stage: &'static str, dominant_error: &'static str) {
         counter!(
             ERASURE_WRITE_QUORUM_FAILURES_TOTAL,
@@ -293,6 +321,7 @@ impl InternodeMetrics {
             outgoing_requests_total: self.outgoing_requests_total.load(Ordering::Relaxed),
             incoming_requests_total: self.incoming_requests_total.load(Ordering::Relaxed),
             errors_total: self.errors_total.load(Ordering::Relaxed),
+            fallbacks_total: self.fallbacks_total.load(Ordering::Relaxed),
             dial_errors_total: self.dial_errors_total.load(Ordering::Relaxed),
             dial_avg_time_nanos,
             last_dial_unix_millis: self.last_dial_unix_millis.load(Ordering::Relaxed),
@@ -306,6 +335,7 @@ impl InternodeMetrics {
         self.outgoing_requests_total.store(0, Ordering::Relaxed);
         self.incoming_requests_total.store(0, Ordering::Relaxed);
         self.errors_total.store(0, Ordering::Relaxed);
+        self.fallbacks_total.store(0, Ordering::Relaxed);
         self.dial_errors_total.store(0, Ordering::Relaxed);
         self.dial_total_time_nanos.store(0, Ordering::Relaxed);
         self.dial_samples_total.store(0, Ordering::Relaxed);
@@ -382,14 +412,42 @@ mod tests {
 
     #[test]
     fn operation_metric_descriptors_include_backend_and_operation_labels() {
-        assert_eq!(INTERNODE_OPERATION_METRICS.len(), 9);
+        assert_eq!(INTERNODE_OPERATION_METRICS.len(), 10);
         for metric in &INTERNODE_OPERATION_METRICS[..5] {
             assert_eq!(metric.labels, &[OPERATION_LABEL, BACKEND_LABEL]);
         }
         for metric in &INTERNODE_OPERATION_METRICS[5..8] {
             assert_eq!(metric.labels, &[OPERATION_LABEL, BACKEND_LABEL, CLASSIFICATION_LABEL]);
         }
-        assert_eq!(INTERNODE_OPERATION_METRICS[8].labels, &[STAGE_LABEL, DOMINANT_ERROR_LABEL]);
+        assert_eq!(INTERNODE_OPERATION_METRICS[9].labels, &[STAGE_LABEL, DOMINANT_ERROR_LABEL]);
+    }
+
+    #[test]
+    fn operation_metrics_include_transport_fallbacks() {
+        let fallback_metric = INTERNODE_OPERATION_METRICS
+            .iter()
+            .find(|metric| metric.name == INTERNODE_OPERATION_FALLBACKS_TOTAL)
+            .expect("transport fallback descriptor should be exported");
+
+        assert_eq!(
+            fallback_metric.labels,
+            &[OPERATION_LABEL, FROM_BACKEND_LABEL, TO_BACKEND_LABEL, CLASSIFICATION_LABEL]
+        );
+    }
+
+    #[test]
+    fn snapshot_counts_transport_fallbacks() {
+        let metrics = InternodeMetrics::default();
+
+        metrics.record_transport_fallback_for_operation(
+            INTERNODE_OPERATION_READ_FILE_STREAM,
+            "accelerated-rdma",
+            INTERNODE_TRANSPORT_BACKEND_TCP_HTTP,
+            "unsupported_backend",
+        );
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.fallbacks_total, 1);
     }
 
     #[test]
@@ -418,6 +476,10 @@ mod tests {
         );
         assert_eq!(
             INTERNODE_OPERATION_METRICS[8].name,
+            "rustfs_system_network_internode_operation_fallbacks_total"
+        );
+        assert_eq!(
+            INTERNODE_OPERATION_METRICS[9].name,
             "rustfs_system_storage_erasure_write_quorum_failures_total"
         );
     }

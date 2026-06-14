@@ -31,8 +31,15 @@ const READ_FILE_STREAM_PATH: &str = "/rustfs/rpc/read_file_stream";
 const PUT_FILE_STREAM_PATH: &str = "/rustfs/rpc/put_file_stream";
 const WALK_DIR_PATH: &str = "/rustfs/rpc/walk_dir";
 const CONTENT_TYPE_JSON: &str = "application/json";
+const ACCELERATED_RDMA_TRANSPORT: &str = "accelerated-rdma";
 
 fn unsupported_transport_message(transport: &str) -> String {
+    if transport.eq_ignore_ascii_case(ACCELERATED_RDMA_TRANSPORT) {
+        return format!(
+            "invalid {ENV_RUSTFS_INTERNODE_DATA_TRANSPORT}={transport:?}; {ACCELERATED_RDMA_TRANSPORT} requires an accelerated transport backend"
+        );
+    }
+
     format!(
         "invalid {ENV_RUSTFS_INTERNODE_DATA_TRANSPORT}={transport:?}; supported values: {}",
         KNOWN_INTERNODE_DATA_TRANSPORT_BACKENDS.join(", ")
@@ -349,6 +356,16 @@ mod tests {
         assert!(err.to_string().contains(ENV_RUSTFS_INTERNODE_DATA_TRANSPORT));
         assert!(err.to_string().contains("unsupported-backend"));
         assert!(err.to_string().contains("supported values: tcp-http, tcp"));
+    }
+
+    #[test]
+    fn transport_config_rejects_accelerated_rdma_with_explicit_message() {
+        let err = build_internode_data_transport(Some(ACCELERATED_RDMA_TRANSPORT))
+            .expect_err("accelerated backend should fail closed in OSS builds");
+
+        assert!(err.to_string().contains(ENV_RUSTFS_INTERNODE_DATA_TRANSPORT));
+        assert!(err.to_string().contains(ACCELERATED_RDMA_TRANSPORT));
+        assert!(err.to_string().contains("requires an accelerated transport backend"));
     }
 
     #[test]

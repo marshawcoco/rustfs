@@ -23,4 +23,5 @@ pub(crate) mod acl;
 pub(crate) mod bucket;
 pub(crate) mod common;
 pub(crate) mod multipart;
+pub(crate) mod rdma_negotiation;
 pub(crate) mod tagging;

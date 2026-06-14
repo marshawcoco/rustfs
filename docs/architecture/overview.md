@@ -22,6 +22,8 @@ hot-path behavior must not drift during this migration.
   startup/readiness, and shutdown contracts.
 - [`storage-control-data-plane.md`](storage-control-data-plane.md): boundaries
   between StorageCore, ECStore, ClusterControlPlane, and BackgroundControllers.
+- [`rdma-dpu-acceleration-boundary.md`](rdma-dpu-acceleration-boundary.md):
+  open-source boundaries for future RDMA and DPU acceleration.
 - [`background-services-inventory.md`](background-services-inventory.md): current
   scanner, heal, lifecycle, replication, config reload, metrics, and shutdown
   surface before BackgroundController work.
