@@ -19,6 +19,8 @@ use s3s::{S3Error, S3ErrorCode, S3Result};
 pub(crate) const S3_RDMA_TOKEN_HEADER: &str = "x-amz-rdma-token";
 pub(crate) const S3_RDMA_REPLY_HEADER: &str = "x-amz-rdma-reply";
 pub(crate) const S3_RDMA_UNSUPPORTED_MESSAGE: &str = "S3 RDMA data path is not available in this build";
+pub(crate) const S3_RDMA_GET_OBJECT_OPERATION: &str = "s3:GetObject";
+pub(crate) const S3_RDMA_RANGE_GET_OPERATION: &str = "s3:RangeGetObject";
 
 const S3_RDMA_NEGOTIATION_REQUESTS_TOTAL: &str = "rustfs_system_network_s3_rdma_negotiation_requests_total";
 const OPERATION_LABEL: &str = "operation";
@@ -36,6 +38,14 @@ pub(crate) fn detect_s3_rdma_negotiation(headers: &HeaderMap) -> S3RdmaNegotiati
         S3RdmaNegotiation::RequestedUnsupported
     } else {
         S3RdmaNegotiation::NotRequested
+    }
+}
+
+pub(crate) fn get_object_rdma_negotiation_operation(has_range: bool) -> &'static str {
+    if has_range {
+        S3_RDMA_RANGE_GET_OPERATION
+    } else {
+        S3_RDMA_GET_OBJECT_OPERATION
     }
 }
 
@@ -78,6 +88,12 @@ mod tests {
     fn negotiation_header_names_are_stable() {
         assert_eq!(S3_RDMA_TOKEN_HEADER, "x-amz-rdma-token");
         assert_eq!(S3_RDMA_REPLY_HEADER, "x-amz-rdma-reply");
+    }
+
+    #[test]
+    fn get_object_negotiation_operation_distinguishes_range_get() {
+        assert_eq!(get_object_rdma_negotiation_operation(false), "s3:GetObject");
+        assert_eq!(get_object_rdma_negotiation_operation(true), "s3:RangeGetObject");
     }
 
     #[test]

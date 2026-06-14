@@ -30,7 +30,10 @@ use crate::storage::options::{
     filter_object_metadata, get_content_sha256_with_query, get_opts, normalize_content_encoding_for_storage, put_opts,
 };
 use crate::storage::request_context::spawn_traced;
-use crate::storage::s3_api::{multipart::parse_list_parts_params, rdma_negotiation::reject_unsupported_s3_rdma_negotiation};
+use crate::storage::s3_api::{
+    multipart::parse_list_parts_params,
+    rdma_negotiation::{get_object_rdma_negotiation_operation, reject_unsupported_s3_rdma_negotiation},
+};
 use crate::storage::sse::{
     SSEType, build_ssec_read_headers, encryption_material_to_metadata, extract_ssekms_context_from_headers,
     map_get_object_reader_error,
@@ -2384,7 +2387,7 @@ impl DefaultObjectUsecase {
             opts,
         } = request_context;
 
-        reject_unsupported_s3_rdma_negotiation(&req.headers, S3Operation::GetObject.as_str())?;
+        reject_unsupported_s3_rdma_negotiation(&req.headers, get_object_rdma_negotiation_operation(rs.is_some()))?;
 
         let manager = get_concurrency_manager();
 
