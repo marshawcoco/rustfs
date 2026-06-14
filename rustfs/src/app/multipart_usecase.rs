@@ -28,6 +28,7 @@ use crate::storage::s3_api::multipart::{
     ListMultipartUploadsParams, build_list_multipart_uploads_output, build_list_parts_output,
     parse_list_multipart_uploads_params, parse_list_parts_params, parse_upload_part_number,
 };
+use crate::storage::s3_api::rdma_negotiation::reject_unsupported_s3_rdma_negotiation;
 use crate::storage::sse::{
     build_ssec_read_headers, encryption_material_to_metadata, extract_ssec_params_from_headers,
     extract_ssekms_context_from_headers, map_get_object_reader_error, mark_encrypted_multipart_metadata,
@@ -703,6 +704,8 @@ impl DefaultMultipartUsecase {
         let mut size = content_length;
         let mut body_stream = body.ok_or_else(|| s3_error!(IncompleteBody))?;
 
+        reject_unsupported_s3_rdma_negotiation(&req.headers, S3Operation::UploadPart.as_str())?;
+
         if size.is_none() {
             if let Some(val) = req.headers.get(AMZ_DECODED_CONTENT_LENGTH)
                 && let Some(x) = atoi::atoi::<i64>(val.as_bytes())
@@ -1281,6 +1284,7 @@ impl DefaultMultipartUsecase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::s3_api::rdma_negotiation::S3_RDMA_TOKEN_HEADER;
     use http::{Extensions, HeaderMap, Method, Uri, header::HeaderValue};
     use rustfs_filemeta::ObjectPartInfo;
     use rustfs_utils::http::{
@@ -1305,6 +1309,12 @@ mod tests {
 
     fn make_usecase() -> DefaultMultipartUsecase {
         DefaultMultipartUsecase::without_context()
+    }
+
+    fn one_chunk_blob(value: &'static [u8]) -> StreamingBlob {
+        StreamingBlob::wrap(futures::stream::once(
+            async move { Ok::<Bytes, std::io::Error>(Bytes::from_static(value)) },
+        ))
     }
 
     #[test]
@@ -1894,6 +1904,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_upload_part_rejects_missing_body_before_rdma_token() {
+        let input = UploadPartInput::builder()
+            .bucket("bucket".to_string())
+            .key("object".to_string())
+            .upload_id("upload-id".to_string())
+            .part_number(1)
+            .build()
+            .unwrap();
+        let mut req = build_request(input, Method::PUT);
+        req.headers
+            .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+
+        let err = make_usecase().execute_upload_part(req).await.unwrap_err();
+        assert_eq!(err.code(), &S3ErrorCode::IncompleteBody);
+    }
+
+    #[tokio::test]
     async fn execute_upload_part_rejects_invalid_part_number_before_body_lookup() {
         for part_number in [-1, 0, 10001] {
             let input = UploadPartInput::builder()
@@ -1909,5 +1936,46 @@ mod tests {
             assert_eq!(err.code(), &S3ErrorCode::InvalidArgument);
             assert_eq!(err.message(), Some("partNumber must be between 1 and 10000"));
         }
+    }
+
+    #[tokio::test]
+    async fn execute_upload_part_rejects_invalid_part_number_before_rdma_token() {
+        for part_number in [-1, 0, 10001] {
+            let input = UploadPartInput::builder()
+                .bucket("bucket".to_string())
+                .key("object".to_string())
+                .upload_id("upload-id".to_string())
+                .part_number(part_number)
+                .body(Some(one_chunk_blob(b"test")))
+                .content_length(Some(4))
+                .build()
+                .unwrap();
+            let mut req = build_request(input, Method::PUT);
+            req.headers
+                .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+
+            let err = make_usecase().execute_upload_part(req).await.unwrap_err();
+            assert_eq!(err.code(), &S3ErrorCode::InvalidArgument);
+            assert_eq!(err.message(), Some("partNumber must be between 1 and 10000"));
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_upload_part_rejects_rdma_token_after_body_and_part_validation() {
+        let input = UploadPartInput::builder()
+            .bucket("bucket".to_string())
+            .key("object".to_string())
+            .upload_id("upload-id".to_string())
+            .part_number(1)
+            .content_length(Some(4))
+            .body(Some(one_chunk_blob(b"test")))
+            .build()
+            .unwrap();
+        let mut req = build_request(input, Method::PUT);
+        req.headers
+            .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+
+        let err = make_usecase().execute_upload_part(req).await.unwrap_err();
+        assert_eq!(err.code(), &S3ErrorCode::InvalidRequest);
     }
 }

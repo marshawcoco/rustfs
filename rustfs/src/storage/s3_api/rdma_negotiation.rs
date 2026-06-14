@@ -13,9 +13,17 @@
 // limitations under the License.
 
 use http::HeaderMap;
+use metrics::counter;
+use s3s::{S3Error, S3ErrorCode, S3Result};
 
 pub(crate) const S3_RDMA_TOKEN_HEADER: &str = "x-amz-rdma-token";
 pub(crate) const S3_RDMA_REPLY_HEADER: &str = "x-amz-rdma-reply";
+pub(crate) const S3_RDMA_UNSUPPORTED_MESSAGE: &str = "S3 RDMA data path is not available in this build";
+
+const S3_RDMA_NEGOTIATION_REQUESTS_TOTAL: &str = "rustfs_system_network_s3_rdma_negotiation_requests_total";
+const OPERATION_LABEL: &str = "operation";
+const CLASSIFICATION_LABEL: &str = "classification";
+const REQUESTED_UNSUPPORTED_CLASSIFICATION: &str = "requested_unsupported";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum S3RdmaNegotiation {
@@ -28,6 +36,21 @@ pub(crate) fn detect_s3_rdma_negotiation(headers: &HeaderMap) -> S3RdmaNegotiati
         S3RdmaNegotiation::RequestedUnsupported
     } else {
         S3RdmaNegotiation::NotRequested
+    }
+}
+
+pub(crate) fn reject_unsupported_s3_rdma_negotiation(headers: &HeaderMap, operation: &'static str) -> S3Result<()> {
+    match detect_s3_rdma_negotiation(headers) {
+        S3RdmaNegotiation::NotRequested => Ok(()),
+        S3RdmaNegotiation::RequestedUnsupported => {
+            counter!(
+                S3_RDMA_NEGOTIATION_REQUESTS_TOTAL,
+                OPERATION_LABEL => operation,
+                CLASSIFICATION_LABEL => REQUESTED_UNSUPPORTED_CLASSIFICATION
+            )
+            .increment(1);
+            Err(S3Error::with_message(S3ErrorCode::InvalidRequest, S3_RDMA_UNSUPPORTED_MESSAGE))
+        }
     }
 }
 
@@ -55,5 +78,23 @@ mod tests {
     fn negotiation_header_names_are_stable() {
         assert_eq!(S3_RDMA_TOKEN_HEADER, "x-amz-rdma-token");
         assert_eq!(S3_RDMA_REPLY_HEADER, "x-amz-rdma-reply");
+    }
+
+    #[test]
+    fn unsupported_negotiation_rejection_is_noop_without_rdma_token() {
+        let headers = HeaderMap::new();
+
+        reject_unsupported_s3_rdma_negotiation(&headers, "s3:GetObject").expect("request should continue without token");
+    }
+
+    #[test]
+    fn unsupported_negotiation_rejection_returns_invalid_request() {
+        let mut headers = HeaderMap::new();
+        headers.insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+
+        let err = reject_unsupported_s3_rdma_negotiation(&headers, "s3:GetObject").unwrap_err();
+
+        assert_eq!(err.code(), &S3ErrorCode::InvalidRequest);
+        assert_eq!(err.message(), Some(S3_RDMA_UNSUPPORTED_MESSAGE));
     }
 }

@@ -30,7 +30,7 @@ use crate::storage::options::{
     filter_object_metadata, get_content_sha256_with_query, get_opts, normalize_content_encoding_for_storage, put_opts,
 };
 use crate::storage::request_context::spawn_traced;
-use crate::storage::s3_api::multipart::parse_list_parts_params;
+use crate::storage::s3_api::{multipart::parse_list_parts_params, rdma_negotiation::reject_unsupported_s3_rdma_negotiation};
 use crate::storage::sse::{
     SSEType, build_ssec_read_headers, encryption_material_to_metadata, extract_ssekms_context_from_headers,
     map_get_object_reader_error,
@@ -1799,6 +1799,8 @@ impl DefaultObjectUsecase {
             return Err(s3_error!(UnexpectedContent));
         }
 
+        reject_unsupported_s3_rdma_negotiation(&req.headers, S3Operation::PutObject.as_str())?;
+
         // Apply adaptive buffer sizing based on file size for optimal streaming performance.
         // Uses workload profile configuration (enabled by default) to select appropriate buffer size.
         // Buffer sizes range from 32KB to 4MB depending on file size and configured workload profile.
@@ -2381,6 +2383,8 @@ impl DefaultObjectUsecase {
             rs,
             opts,
         } = request_context;
+
+        reject_unsupported_s3_rdma_negotiation(&req.headers, S3Operation::GetObject.as_str())?;
 
         let manager = get_concurrency_manager();
 
@@ -4578,6 +4582,7 @@ fn object_attributes_requested(object_attributes: &[ObjectAttributes], name: &'s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::s3_api::rdma_negotiation::S3_RDMA_TOKEN_HEADER;
     use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, Uri};
     use s3s::dto::{
         DeleteMarkerReplication, DeleteMarkerReplicationStatus, Destination, ExistingObjectReplication,
@@ -4600,6 +4605,12 @@ mod tests {
             service: None,
             trailing_headers: None,
         }
+    }
+
+    fn one_chunk_blob(value: &'static [u8]) -> StreamingBlob {
+        StreamingBlob::wrap(futures::stream::once(
+            async move { Ok::<Bytes, std::io::Error>(Bytes::from_static(value)) },
+        ))
     }
 
     #[test]
@@ -5238,6 +5249,47 @@ mod tests {
         assert_eq!(err.code(), &S3ErrorCode::InvalidStorageClass);
     }
 
+    #[tokio::test]
+    async fn execute_put_object_rejects_missing_body_before_rdma_token() {
+        let input = PutObjectInput::builder()
+            .bucket("test-bucket".to_string())
+            .key("test-key".to_string())
+            .content_length(Some(4))
+            .build()
+            .unwrap();
+
+        let mut req = build_request(input, Method::PUT);
+        req.headers
+            .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+
+        let usecase = DefaultObjectUsecase::without_context();
+        let fs = FS::new();
+
+        let err = Box::pin(usecase.execute_put_object(&fs, req)).await.unwrap_err();
+        assert_eq!(err.code(), &S3ErrorCode::IncompleteBody);
+    }
+
+    #[tokio::test]
+    async fn execute_put_object_rejects_rdma_token_after_body_validation() {
+        let input = PutObjectInput::builder()
+            .bucket("test-bucket".to_string())
+            .key("test-key".to_string())
+            .content_length(Some(4))
+            .body(Some(one_chunk_blob(b"test")))
+            .build()
+            .unwrap();
+
+        let mut req = build_request(input, Method::PUT);
+        req.headers
+            .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+
+        let usecase = DefaultObjectUsecase::without_context();
+        let fs = FS::new();
+
+        let err = Box::pin(usecase.execute_put_object(&fs, req)).await.unwrap_err();
+        assert_eq!(err.code(), &S3ErrorCode::InvalidRequest);
+    }
+
     #[test]
     fn response_storage_class_omits_standard_and_keeps_non_default() {
         let metadata = HashMap::new();
@@ -5294,6 +5346,42 @@ mod tests {
 
         let err = Box::pin(usecase.execute_get_object(req)).await.unwrap_err();
         assert_eq!(err.code(), &S3ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn execute_get_object_rejects_range_with_part_number_before_rdma_token() {
+        let input = GetObjectInput::builder()
+            .bucket("test-bucket".to_string())
+            .key("test-key".to_string())
+            .part_number(Some(1))
+            .range(Some(Range::Int { first: 0, last: Some(1) }))
+            .build()
+            .unwrap();
+
+        let mut req = build_request(input, Method::GET);
+        req.headers
+            .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+        let usecase = DefaultObjectUsecase::without_context();
+
+        let err = Box::pin(usecase.execute_get_object(req)).await.unwrap_err();
+        assert_eq!(err.code(), &S3ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn execute_get_object_rejects_rdma_token_after_request_validation() {
+        let input = GetObjectInput::builder()
+            .bucket("test-bucket".to_string())
+            .key("test-key".to_string())
+            .build()
+            .unwrap();
+
+        let mut req = build_request(input, Method::GET);
+        req.headers
+            .insert(S3_RDMA_TOKEN_HEADER, HeaderValue::from_static("client-token"));
+        let usecase = DefaultObjectUsecase::without_context();
+
+        let err = Box::pin(usecase.execute_get_object(req)).await.unwrap_err();
+        assert_eq!(err.code(), &S3ErrorCode::InvalidRequest);
     }
 
     #[tokio::test]
