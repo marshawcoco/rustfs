@@ -36,7 +36,7 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 
 | Client or engine | Status | Claim |
 |---|---|---|
-| PyIceberg | Automated | Namespace and table create, append, reload, scan, metadata-location, refs, views, maintenance, diagnostics, optional vended credentials with an exact-prefix data-plane scope check. |
+| PyIceberg | Automated | Namespace and table create, append, exact-row reload/scan, metadata-location, refs, views, namespace properties, rename identity and credential negotiation. The smoke discovers the server backing: object mode checks maintenance/diagnostics/export; durable-strong checks their exact rejection and unchanged commit state. Optional vended credentials include an exact-prefix data-plane scope check. |
 | Spark Iceberg REST catalog | Manual/live harness | Pinned package inputs, catalog properties, SQL, expected `row_count=2`, and a CI opt-in gate for create/append/refresh/count/cleanup. Live execution and commit-conflict probing remain manual unless enabled in the runner. |
 | Trino Iceberg REST catalog | Manual/live harness | Catalog properties and a read-only `SELECT COUNT(*)` against a PyIceberg- or Spark-created table. Write compatibility not claimed. |
 | DuckDB Iceberg 1.5.5 | Automated | `duckdb_smoke.py` covers metadata-location read, single-table create/insert/update/delete/merge, schema evolution, snapshots, concurrent writers, drop, PyIceberg cross-read, and both signing profiles. Staged create, purge-on-drop, and format v3 are verified fail-closed. Two-table mode runs without claiming cross-table atomicity. AWS `ENDPOINT_TYPE S3_TABLES` and vended-credential integration not claimed. |
@@ -62,11 +62,12 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 | Namespaces | Supported | Create, list, load, exists, drop on both prefixes; `pageSize`/`pageToken` pagination with context-bound tokens; identifiers limited to 512 ASCII characters. |
 | Tables | Supported | Create, register, list, load, exists, rename, commit, metadata-location get/update, drop on both prefixes. Rename uses a bucket-scoped persistent fence, recoverable intent, and conditional publication; the source name is reusable only via an ETag-conditional tombstone replacement. Commit identifiers must match the URL; unknown requirements/updates fail as bad requests; staged create, register overwrite, purge-on-drop, and v3-only encryption-key updates return an explicit unsupported-operation response. |
 | Commit CAS | Supported | Single-table commits validate base metadata, version token, referenced object existence, warehouse scope, and Iceberg requirements before advancing the pointer; external metadata transitions preserve monotonic assignment watermarks and immutable retained definitions. `idempotency-key-lifetime` is not advertised; mutation-wide `Idempotency-Key` semantics are unsupported. |
+| Registration scope | Restricted | Register/import require metadata in the requested identifier's protected metadata directory. Re-registering a dropped table at its original identifier preserves the Iceberg UUID and warehouse; an arbitrary external metadata URI or another identifier's protected metadata path is not accepted. |
 | Commit recovery | Supported | Commit log, idempotency lookup, diagnostics, and recovery routes expose and repair finalization gaps without moving the pointer. |
 | Snapshot refs | Supported | List, create/replace, delete via commits; `main` is protected; refs with explicit retention need forced delete. |
 | Iceberg views | Supported | Create, list, load, replace, exists, drop with view-scoped authorization; only view format version 1. |
 | LoadTable and table credentials endpoint | Supported | Vending only on negotiated `vended-credentials`; one temporary session scoped to the warehouse prefix and current metadata location; missing credential permission falls back to metadata-only with an explicit reason; responses carry `Cache-Control: no-store, private`. |
-| Catalog diagnostics and export | Supported | Recovery state, consistency, backing manifest, WAL state, migration target, single-active-writer policy, scale validation matrix. |
+| Catalog diagnostics and export | Supported in object mode | Recovery state, consistency, backing manifest, WAL state, migration target, single-active-writer policy, scale validation matrix. Configured durable-strong mode rejects these operations; its commit recovery endpoint remains available. |
 | Catalog import and rollback | Supported | Import/register and online rollback go through validation and commit paths. Online rollback accepts only forward-safe targets; restoring an older target that lowers watermarks is an offline disaster-recovery operation with all writers stopped. |
 | External catalog bridge | Supported operator path | Operator-supplied metadata pointer sync/import. Vendor SDK polling and policy mirroring not claimed. |
 | Multi-table transactions | Not claimed | Single-table commit atomicity only. |
@@ -83,6 +84,8 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 | No-long-term-data-credential bootstrap | Not claimed | Catalog setup still uses the configured principal before table-scoped credentials are requested. |
 
 ## Maintenance Matrix
+
+The maintenance operations below apply to object-backed catalogs. Configured durable-strong mode rejects maintenance operations; object-mode coverage must not be used as evidence of strong-mode maintenance support. The client smoke checks that the rejection does not advance the table pointer, token, or generation.
 
 | Capability | Status | Claim |
 |---|---|---|
@@ -111,7 +114,7 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 | Idempotent retry | Supported | Repeated commit IDs return the finalized result or surface recoverable finalization gaps. |
 | Commit publication fencing | Supported with rolling-upgrade gate | Exact object guards protect referenced files during publication. Set `RUSTFS_TABLE_CATALOG_PUBLICATION_FENCE_FLEET_CONFIRMED=true` only after every serving node supports table and table-bucket fences. In scalable mode, warehouse prefixes must not overlap and enablement, first publication, drop, and relocation are serialized by the table-bucket fence. |
 | Post-CAS finalization recovery | Supported | Repairs stale or missing idempotency indexes without changing the pointer. |
-| Catalog export | Supported | Table state, commit recovery state, and backing migration information. |
+| Catalog export | Supported in object mode | Table state and backing migration information. Configured durable-strong export is unsupported. |
 | Strong backing state transfer | Supported | Object-backed catalog state is materialized into the durable strong snapshot deterministically, ETag-CAS protected, idempotent after interrupted finalization, and validated through the restart decoder before publication; conflicts between inactive explicit namespaces and active descendants fail closed. Hydration requires a stable non-empty ETag, caps the snapshot at 64 MiB, and rejects disappearance or format-version rollback after observation. Configured durable-strong mode rejects a missing snapshot on first access; only object-backed migration may initialize an empty target. |
 | Durable backing migration preflight | Supported | `GET /iceberg/v1/{warehouse}/catalog/migration` (and the alias) reports inventory, recovery blockers, prefix-index readiness, identifier collisions, fence state, target agreement, and per-bucket cutover readiness. |
 | Durable backing migration execution | Preview / controlled | `POST /iceberg/v1/{warehouse}/catalog/migration` fences registry changes, acquires a persistent per-bucket write fence, drains in-flight mutations, materializes the snapshot, and reports `ready_to_enable_durable_strong`. `DELETE` cancels only while the target has not advanced. Both mutations require `admin:MigrateTableCatalog`. Procedure: [s3-tables-cutover-runbook.md](../operations/s3-tables-cutover-runbook.md). |
@@ -130,7 +133,7 @@ Do not promote a failure case from live probe or load test to an automated claim
 
 ## Unsupported Or Not Claimed
 
-Full AWS S3 Tables control-plane parity; full MinIO AIStor private extensions; full Cloudflare R2 Data Catalog or Alibaba OSS Tables interoperability; built-in periodic maintenance scheduling; active-active multi-region writes; multi-table transactions; no-long-term-data-credential bootstrap; online vendor SDK polling; external catalog policy mirroring; delete-file rewrite or row-level compaction execution; built-in SQL execution; Delta Lake or Hudi; end-to-end SQL row-level DML validation through Spark, Trino, or another engine.
+Full AWS S3 Tables control-plane parity; full MinIO AIStor private extensions; full Cloudflare R2 Data Catalog or Alibaba OSS Tables interoperability; built-in periodic maintenance scheduling; durable-strong maintenance, diagnostics, and export; active-active multi-region writes; multi-table transactions; no-long-term-data-credential bootstrap; online vendor SDK polling; external catalog policy mirroring; delete-file rewrite or row-level compaction execution; built-in SQL execution; Delta Lake or Hudi; end-to-end SQL row-level DML validation through Spark or Trino. DuckDB single-table UPDATE/DELETE/MERGE has its own automated smoke coverage as listed above; this does not establish other engines' DML compatibility.
 
 ## Verification
 
