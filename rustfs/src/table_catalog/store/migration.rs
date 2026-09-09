@@ -445,6 +445,7 @@ where
             views,
             commits,
             idempotency,
+            archives: Vec::new(),
         };
         self.validate_bucket_snapshot_for_migration(&snapshot)?;
         Ok(snapshot)

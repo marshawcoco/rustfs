@@ -9,6 +9,12 @@ For the release-facing support and limitation matrix, see
 
 ## PyIceberg Smoke Test
 
+### Durable Capacity Probe
+
+On an isolated, preconfigured durable-strong warehouse, with the version 3 fleet gates enabled, run `python3 scripts/table-catalog/durable_capacity_smoke.py --endpoint http://127.0.0.1:9000 --warehouse analytics --bucket analytics --cleanup`. It uses the same environment credentials and connection options as the PyIceberg smoke below. The caller needs global `admin:GetTableCatalog` and `admin:MigrateTableCatalog`, plus namespace/table and data-plane permissions.
+
+The probe creates two tables with real rows, performs 40 metadata commits, checks archived replay and changed-payload rejection without pointer movement, and runs bounded same-table/different-table contention with explicit serialized retries. It reports snapshot size, online/archive receipt counts, sampled 95th/99th percentile latency, and initial conflicts. This is a functional baseline, not a production latency or scale qualification. Cleanup drops only identifiers; use disposable storage and reclaim its physical objects separately. See the [capacity and upgrade procedure](../../docs/operations/s3-tables-cutover-runbook.md#durable-catalog-capacity-and-receipt-archives) before enabling version 3.
+
 Install the client dependencies:
 
 ```bash

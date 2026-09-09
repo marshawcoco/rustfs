@@ -172,6 +172,29 @@ async fn table_catalog_authentication_and_credentials_use_the_request_context() 
     let resolved_store =
         runtime_sources::object_store_from_extensions(&request.extensions).expect("request object store should resolve");
     assert!(Arc::ptr_eq(&resolved_store, &store));
+    let mut router = matchit::Router::new();
+    router.insert("/iceberg/v1/{warehouse}/catalog/{operation}", ()).unwrap();
+    for operation in ["capacity", "compact"] {
+        let path = format!("/iceberg/v1/analytics/catalog/{operation}");
+        let matched = router.at(&path).unwrap();
+        let denied = S3Request {
+            input: Body::empty(),
+            method: if operation == "capacity" { Method::GET } else { Method::POST },
+            uri: path.parse().unwrap(),
+            headers: HeaderMap::new(),
+            extensions: request.extensions.clone(),
+            credentials: request.credentials.clone(),
+            region: None,
+            service: None,
+            trailing_headers: None,
+        };
+        let result = if operation == "capacity" {
+            GetTableCatalogCapacityHandler {}.call(denied, matched.params).await
+        } else {
+            CompactTableCatalogHandler {}.call(denied, matched.params).await
+        };
+        assert_eq!(result.unwrap_err().code(), &S3ErrorCode::AccessDenied);
+    }
 }
 
 #[tokio::test]
@@ -598,6 +621,18 @@ fn table_catalog_admin_operation_result_labels_are_stable() {
 #[test]
 fn table_catalog_handlers_require_table_admin_actions() {
     let src = table_catalog_handler_source();
+
+    for (handler, action) in [
+        ("GetTableCatalogCapacityHandler", "GetTableCatalogAction"),
+        ("CompactTableCatalogHandler", "MigrateTableCatalogAction"),
+    ] {
+        let block = operation_block(&src, handler);
+        assert!(block.contains(&format!("authorize_table_catalog_request(&req, AdminAction::{action}).await?;")));
+        assert!(!block.contains("authorize_table_catalog_resource_request("));
+        assert!(
+            block.find("authorize_table_catalog_request").unwrap() < block.find("table_catalog_store_from_extensions").unwrap()
+        );
+    }
 
     assert!(
         operation_block(&src, "GetCatalogConfigHandler")

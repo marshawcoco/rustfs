@@ -182,6 +182,8 @@ const TABLE_CATALOG_DURABLE_STRONG_ENDPOINTS: &[&str] = &[];
 static GET_CONFIG_HANDLER: GetCatalogConfigHandler = GetCatalogConfigHandler {};
 static ENABLE_TABLE_BUCKET_HANDLER: EnableTableBucketHandler = EnableTableBucketHandler {};
 static GET_TABLE_BUCKET_HANDLER: GetTableBucketHandler = GetTableBucketHandler {};
+static GET_TABLE_CATALOG_CAPACITY_HANDLER: GetTableCatalogCapacityHandler = GetTableCatalogCapacityHandler {};
+static COMPACT_TABLE_CATALOG_HANDLER: CompactTableCatalogHandler = CompactTableCatalogHandler {};
 static GET_TABLE_CATALOG_MIGRATION_HANDLER: GetTableCatalogMigrationHandler = GetTableCatalogMigrationHandler {};
 static MATERIALIZE_TABLE_CATALOG_MIGRATION_HANDLER: MaterializeTableCatalogMigrationHandler =
     MaterializeTableCatalogMigrationHandler {};

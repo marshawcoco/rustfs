@@ -3510,6 +3510,7 @@ fn test_strong_snapshot(
     views: Vec<ViewEntry>,
 ) -> StrongTableCatalogSnapshot {
     StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![test_namespace_entry(bucket, namespace)],
@@ -12415,6 +12416,397 @@ async fn strong_catalog_rejects_oversized_snapshot_before_publication() {
     );
 }
 
+async fn strong_catalog_with_commit_history(
+    count: usize,
+) -> (
+    TestCatalogObjectBackend,
+    StrongTableCatalogStore<TestCatalogObjectBackend>,
+    Vec<TableCommitRequest>,
+) {
+    let backend = TestCatalogObjectBackend::default();
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_TABLE_CATALOG_SNAPSHOT_VERSION);
+    let namespace = Namespace::parse("sales").unwrap();
+    let table = IdentifierSegment::parse("orders").unwrap();
+    let mut entry = test_table_entry(
+        "analytics",
+        &namespace,
+        &table,
+        default_table_metadata_file_path(&namespace, &table, "initial.metadata.json"),
+    );
+    entry.table_uuid = Uuid::new_v4().to_string();
+    store.put_table_bucket(test_bucket_entry("analytics")).await.unwrap();
+    store
+        .create_namespace(test_namespace_entry("analytics", &namespace))
+        .await
+        .unwrap();
+    let metadata =
+        serde_json::to_vec(&super::test_support::table_metadata_json(&entry.table_uuid, &entry.warehouse_location)).unwrap();
+    backend
+        .seed_object("analytics", &entry.metadata_location, metadata.clone())
+        .await;
+    store.register_table(entry.clone()).await.unwrap();
+    let mut requests = Vec::new();
+    for number in 0..count {
+        let location = default_table_metadata_file_path(&namespace, &table, &format!("{number}.metadata.json"));
+        backend.seed_object("analytics", &location, metadata.clone()).await;
+        let request = TableCommitRequest {
+            table_bucket: "analytics".to_string(),
+            namespace: "sales".to_string(),
+            table: "orders".to_string(),
+            commit_id: format!("commit-{number}"),
+            idempotency_key: Some(format!("request-{number}")),
+            operation: "append".to_string(),
+            expected_version_token: entry.version_token,
+            expected_metadata_location: entry.metadata_location,
+            new_metadata_location: location,
+            requirements: Vec::new(),
+            writer: Some("archive-test".to_string()),
+        };
+        entry = store.commit_table(request.clone()).await.unwrap().table;
+        requests.push(request);
+    }
+    (backend, store, requests)
+}
+
+#[tokio::test]
+async fn strong_catalog_capacity_pressure_allows_receipt_repair_and_shrinking_governance() {
+    let (backend, _, requests) = strong_catalog_with_commit_history(1).await;
+    let mut snapshot = read_strong_snapshot(&backend).await;
+    snapshot.idempotency.clear();
+    snapshot.table_buckets[0]
+        .properties
+        .insert("legacy-large-property".to_string(), "x".repeat(57 * 1024 * 1024));
+    seed_strong_snapshot(&backend, &snapshot).await;
+    let store = StrongTableCatalogStore::new(backend.clone());
+    let report = serde_json::to_value(store.catalog_capacity("analytics").await.unwrap()).unwrap();
+    assert_eq!(report["warning"], true);
+    let namespace = Namespace::parse("blocked-growth").unwrap();
+    assert_matches!(
+        store.create_namespace(test_namespace_entry("analytics", &namespace)).await,
+        Err(TableCatalogStoreError::Unavailable(_))
+    );
+    assert_eq!(read_strong_snapshot(&backend).await, snapshot);
+    store.commit_table(requests[0].clone()).await.unwrap();
+    let repaired = read_strong_snapshot(&backend).await;
+    assert_eq!(repaired.tables, snapshot.tables);
+    assert_eq!(repaired.idempotency.len(), 1);
+    store
+        .rename_table("analytics", "sales", "orders", "sales", "renamed-with-a-longer-name")
+        .await
+        .unwrap();
+    let mut bucket = store.get_table_bucket("analytics").await.unwrap().unwrap();
+    bucket.properties.clear();
+    store.put_table_bucket(bucket).await.unwrap();
+    store
+        .create_namespace(test_namespace_entry("analytics", &namespace))
+        .await
+        .unwrap();
+    let report = serde_json::to_value(store.catalog_capacity("analytics").await.unwrap()).unwrap();
+    assert_eq!(report["warning"], false);
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_preserves_replay_restart_rename_and_identity() {
+    let (backend, old, requests) = strong_catalog_with_commit_history(36).await;
+    let before = old.load_table("analytics", "sales", "orders").await.unwrap().unwrap();
+    let original = old.get_commit_by_id("analytics", &before.table_id, "commit-0").await.unwrap();
+    assert_matches!(old.compact_catalog("analytics").await, Err(TableCatalogStoreError::Unsupported(_)));
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    let report = serde_json::to_value(store.compact_catalog("analytics").await.unwrap()).unwrap();
+    assert_eq!(report["online-receipts"], 32);
+    assert_eq!(report["archived-receipts"], 4);
+    assert_eq!(report["pending-archive-receipts"], 0);
+    assert_eq!(store.load_table("analytics", "sales", "orders").await.unwrap(), Some(before.clone()));
+    let snapshot = read_strong_snapshot(&backend).await;
+    assert_eq!(snapshot.commits.len(), 32);
+    assert_eq!(snapshot.idempotency.len(), 32);
+    assert_eq!(snapshot.archives.as_ref().unwrap().len(), 1);
+    let restart = StrongTableCatalogStore::new(backend.clone());
+    assert_eq!(
+        restart
+            .get_commit_by_id("analytics", &before.table_id, "commit-0")
+            .await
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        restart
+            .get_commit_by_idempotency_key("analytics", &before.table_id, "request-0")
+            .await
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        restart.commit_table(requests[0].clone()).await.unwrap().commit_log,
+        original.clone().unwrap()
+    );
+    for changed_id in [false, true] {
+        let mut conflict = requests[0].clone();
+        conflict.expected_version_token = before.version_token.clone();
+        conflict.expected_metadata_location = before.metadata_location.clone();
+        if changed_id {
+            conflict.commit_id = "new-id-old-key".to_string();
+        }
+        assert_matches!(restart.commit_table(conflict).await, Err(TableCatalogStoreError::Conflict(_)));
+        assert_eq!(restart.load_table("analytics", "sales", "orders").await.unwrap(), Some(before.clone()));
+    }
+    restart
+        .rename_table("analytics", "sales", "orders", "sales", "renamed")
+        .await
+        .unwrap();
+    let mut replay = requests[0].clone();
+    replay.table = "renamed".to_string();
+    assert_eq!(restart.commit_table(replay).await.unwrap().commit_log, original.unwrap());
+    restart.drop_table("analytics", "sales", "renamed").await.unwrap();
+    assert!(
+        restart
+            .get_commit_by_id("analytics", &before.table_id, "commit-0")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(read_strong_snapshot(&backend).await.archives.unwrap().is_empty());
+    assert!(
+        backend
+            .read_object("analytics", &before.metadata_location)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_rejects_corrupt_and_missing_nodes_without_reusing_ids() {
+    for missing in [false, true] {
+        let (backend, _, requests) = strong_catalog_with_commit_history(34).await;
+        let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+        store.compact_catalog("analytics").await.unwrap();
+        let snapshot = read_strong_snapshot(&backend).await;
+        let roots = serde_json::to_value(snapshot.archives.as_ref().unwrap()).unwrap();
+        let root = roots[0]["root"].as_str().unwrap();
+        let path = format!("{INTERNAL_CATALOG_ROOT}/{STRONG_TABLE_CATALOG_BACKING_ROOT}/receipts/{root}.json");
+        if missing {
+            backend.delete_object(RUSTFS_META_BUCKET, &path).await.unwrap();
+        } else {
+            backend.seed_object(RUSTFS_META_BUCKET, &path, b"{}".to_vec()).await;
+        }
+        let mut request = requests[0].clone();
+        let current = store.load_table("analytics", "sales", "orders").await.unwrap().unwrap();
+        request.expected_version_token = current.version_token.clone();
+        request.expected_metadata_location = current.metadata_location.clone();
+        assert_matches!(store.commit_table(request).await, Err(TableCatalogStoreError::Internal(_)));
+        assert_eq!(read_strong_snapshot(&backend).await, snapshot);
+        assert_eq!(store.load_table("analytics", "sales", "orders").await.unwrap(), Some(current));
+    }
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_rejects_invalid_persisted_root_authority() {
+    let (backend, _, _) = strong_catalog_with_commit_history(33).await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    store.compact_catalog("analytics").await.unwrap();
+    let valid = serde_json::to_value(read_strong_snapshot(&backend).await).unwrap();
+    for poison in ["null", "zero-count", "invalid-digest", "wrong-owner", "duplicate"] {
+        let mut invalid = valid.clone();
+        match poison {
+            "null" => invalid["archives"] = serde_json::Value::Null,
+            "zero-count" => invalid["archives"][0]["receipts"] = serde_json::json!(0),
+            "invalid-digest" => invalid["archives"][0]["root"] = serde_json::json!("../receipt"),
+            "wrong-owner" => invalid["archives"][0]["table_id"] = serde_json::json!("another-table-id"),
+            "duplicate" => {
+                let duplicate = invalid["archives"][0].clone();
+                invalid["archives"].as_array_mut().unwrap().push(duplicate);
+            }
+            _ => unreachable!(),
+        }
+        let invalid: StrongTableCatalogSnapshot = serde_json::from_value(invalid).unwrap();
+        assert_matches!(strong_snapshot_hydration_error(invalid).await, TableCatalogStoreError::Invalid(_));
+    }
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_cas_failure_and_response_loss_are_recoverable() {
+    for lost_response in [false, true] {
+        let (backend, _, requests) = strong_catalog_with_commit_history(34).await;
+        let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+        let before = read_strong_snapshot(&backend).await;
+        let path = StrongTableCatalogStore::<TestCatalogObjectBackend>::snapshot_object_path();
+        if lost_response {
+            backend.fail_after_next_put(RUSTFS_META_BUCKET, &path).await;
+        } else {
+            backend.fail_next_put(RUSTFS_META_BUCKET, &path).await;
+        }
+        let result = store.compact_catalog("analytics").await;
+        if lost_response {
+            result.unwrap();
+            assert_eq!(read_strong_snapshot(&backend).await.version, STRONG_SNAPSHOT_ARCHIVE_VERSION);
+        } else {
+            assert_matches!(result, Err(TableCatalogStoreError::Internal(_)));
+            assert_eq!(read_strong_snapshot(&backend).await, before);
+        }
+        store.compact_catalog("analytics").await.unwrap();
+        let snapshot = read_strong_snapshot(&backend).await;
+        assert_eq!(snapshot.commits.len(), 32);
+        assert_eq!(serde_json::to_value(&snapshot.archives).unwrap()[0]["receipts"], 2);
+        store.commit_table(requests[0].clone()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_upgrade_requires_a_published_version_even_without_old_receipts() {
+    let (backend, _, _) = strong_catalog_with_commit_history(1).await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    let before = read_strong_snapshot(&backend).await;
+    let path = StrongTableCatalogStore::<TestCatalogObjectBackend>::snapshot_object_path();
+    backend.fail_next_put(RUSTFS_META_BUCKET, &path).await;
+    assert_matches!(store.compact_catalog("analytics").await, Err(TableCatalogStoreError::Internal(_)));
+    assert_eq!(read_strong_snapshot(&backend).await, before);
+    backend.fail_after_next_put(RUSTFS_META_BUCKET, &path).await;
+    store.compact_catalog("analytics").await.unwrap();
+    assert_eq!(read_strong_snapshot(&backend).await.version, STRONG_SNAPSHOT_ARCHIVE_VERSION);
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_retains_staged_history_and_requires_v3_index() {
+    let (backend, _, _) = strong_catalog_with_commit_history(34).await;
+    let mut snapshot = read_strong_snapshot(&backend).await;
+    snapshot.commits[0].commit.status = CommitLogStatus::Staged;
+    let id = snapshot.commits[0].commit.commit_id.clone();
+    snapshot
+        .idempotency
+        .iter_mut()
+        .find(|record| record.commit.commit_id == id)
+        .unwrap()
+        .commit
+        .status = CommitLogStatus::Staged;
+    seed_strong_snapshot(&backend, &snapshot).await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    store.compact_catalog("analytics").await.unwrap();
+    let after = read_strong_snapshot(&backend).await;
+    assert_eq!(after.commits, snapshot.commits);
+    assert!(after.archives.as_ref().unwrap().is_empty());
+    let mut invalid = after;
+    invalid.archives = None;
+    assert_matches!(strong_snapshot_hydration_error(invalid).await, TableCatalogStoreError::Invalid(message) if message.contains("missing its receipt archive index"));
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_cannot_overwrite_a_concurrent_catalog_change() {
+    let (backend, _, requests) = strong_catalog_with_commit_history(34).await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    let path = StrongTableCatalogStore::<TestCatalogObjectBackend>::snapshot_object_path();
+    let pause = backend.pause_next_put(RUSTFS_META_BUCKET, &path).await;
+    let task = tokio::spawn(async move { store.compact_catalog("analytics").await });
+    tokio::time::timeout(TABLE_CATALOG_TEST_TIMEOUT, pause.wait_started())
+        .await
+        .unwrap();
+    let independent = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    independent.put_table_bucket(test_bucket_entry("unrelated")).await.unwrap();
+    let winner = read_strong_snapshot(&backend).await;
+    pause.release();
+    assert_matches!(task.await.unwrap(), Err(TableCatalogStoreError::Conflict(_)));
+    assert_eq!(read_strong_snapshot(&backend).await, winner);
+    independent.compact_catalog("analytics").await.unwrap();
+    independent.commit_table(requests[0].clone()).await.unwrap();
+    assert!(independent.get_table_bucket("unrelated").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_cancellation_leaves_online_history_authoritative() {
+    let (backend, _, requests) = strong_catalog_with_commit_history(34).await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    let before = read_strong_snapshot(&backend).await;
+    let path = StrongTableCatalogStore::<TestCatalogObjectBackend>::snapshot_object_path();
+    let pause = backend.pause_next_put(RUSTFS_META_BUCKET, &path).await;
+    let task = tokio::spawn(async move { store.compact_catalog("analytics").await });
+    tokio::time::timeout(TABLE_CATALOG_TEST_TIMEOUT, pause.wait_started())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    pause.release();
+    assert_eq!(read_strong_snapshot(&backend).await, before);
+    let restart = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    restart.commit_table(requests[0].clone()).await.unwrap();
+    restart.compact_catalog("analytics").await.unwrap();
+    restart.commit_table(requests[0].clone()).await.unwrap();
+    assert_eq!(read_strong_snapshot(&backend).await.commits.len(), 32);
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_rechecks_publication_before_snapshot_write() {
+    let (backend, old, requests) = strong_catalog_with_commit_history(32).await;
+    let current = old.load_table("analytics", "sales", "orders").await.unwrap().unwrap();
+    let before = read_strong_snapshot(&backend).await;
+    let mut request = requests[0].clone();
+    request.commit_id = "lost-fence".to_string();
+    request.idempotency_key = Some("lost-fence-retry".to_string());
+    request.expected_version_token = current.version_token;
+    request.expected_metadata_location = current.metadata_location;
+    request.new_metadata_location = request
+        .new_metadata_location
+        .replace("0.metadata.json", "lost-fence.metadata.json");
+    let metadata = backend
+        .read_object("analytics", &requests[0].new_metadata_location)
+        .await
+        .unwrap()
+        .unwrap()
+        .data;
+    backend
+        .seed_object("analytics", &request.new_metadata_location, metadata)
+        .await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+
+    assert_matches!(
+        store.commit_table_with_publication(request.clone(), &LosingTestPublication::default()).await,
+        Err(TableCatalogStoreError::Internal(message)) if message.contains("publication fence was lost")
+    );
+    assert_eq!(read_strong_snapshot(&backend).await, before);
+    let archive_prefix = format!("{INTERNAL_CATALOG_ROOT}/{STRONG_TABLE_CATALOG_BACKING_ROOT}/receipts/");
+    assert!(
+        !backend
+            .list_objects(RUSTFS_META_BUCKET, &archive_prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.commit_table(request).await.unwrap();
+    assert_eq!(read_strong_snapshot(&backend).await.commits.len(), 32);
+}
+
+#[tokio::test]
+async fn strong_catalog_archival_automatic_retention_has_exact_boundaries() {
+    let (backend, _, requests) = strong_catalog_with_commit_history(31).await;
+    let store = StrongTableCatalogStore::new_with_snapshot_write_version(backend.clone(), STRONG_SNAPSHOT_ARCHIVE_VERSION);
+    store.compact_catalog("analytics").await.unwrap();
+    let namespace = Namespace::parse("sales").unwrap();
+    let table = IdentifierSegment::parse("orders").unwrap();
+    let metadata = backend
+        .read_object("analytics", &requests[0].new_metadata_location)
+        .await
+        .unwrap()
+        .unwrap()
+        .data;
+    for number in 31..36 {
+        let current = store.load_table("analytics", "sales", "orders").await.unwrap().unwrap();
+        let mut request = requests[0].clone();
+        request.commit_id = format!("auto-{number}");
+        request.idempotency_key = Some(format!("auto-retry-{number}"));
+        request.expected_metadata_location = current.metadata_location;
+        request.expected_version_token = current.version_token;
+        request.new_metadata_location =
+            default_table_metadata_file_path(&namespace, &table, &format!("auto-{number}.metadata.json"));
+        backend
+            .seed_object("analytics", &request.new_metadata_location, metadata.clone())
+            .await;
+        let result = store.commit_table(request).await.unwrap();
+        let snapshot = read_strong_snapshot(&backend).await;
+        assert_eq!(snapshot.commits.len(), 32);
+        assert!(snapshot.commits.iter().any(|record| record.commit == result.commit_log));
+        assert_eq!(store.commit_table(requests[0].clone()).await.unwrap().table, result.table);
+    }
+}
+
 #[tokio::test]
 async fn strong_catalog_coalesces_concurrent_snapshot_reloads() {
     let backend = TestCatalogObjectBackend::default();
@@ -12647,6 +13039,7 @@ async fn strong_catalog_backing_rejects_duplicate_snapshot_warehouse_index_entri
     returns_entry.table_uuid = "table-uuid-2".to_string();
 
     let snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![test_namespace_entry(bucket, &namespace)],
@@ -12687,7 +13080,16 @@ fn strong_catalog_snapshot_v2_requires_fleet_confirmation() {
         (false, true, STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION),
         (true, true, STRONG_TABLE_CATALOG_SNAPSHOT_VERSION),
     ] {
-        assert_eq!(strong_snapshot_write_version(requested, fleet_confirmed), expected);
+        for (archive_requested, archive_fleet) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                strong_snapshot_write_version(requested, fleet_confirmed, archive_requested, archive_fleet),
+                if archive_requested && archive_fleet {
+                    STRONG_SNAPSHOT_ARCHIVE_VERSION
+                } else {
+                    expected
+                }
+            );
+        }
     }
 }
 
@@ -12910,7 +13312,7 @@ async fn strong_catalog_snapshot_rejects_unknown_fields_and_versions() {
         .as_object_mut()
         .expect("snapshot should be an object")
         .remove("future-field");
-    value["version"] = serde_json::Value::from(STRONG_TABLE_CATALOG_SNAPSHOT_VERSION.saturating_add(1));
+    value["version"] = serde_json::Value::from(STRONG_SNAPSHOT_ARCHIVE_VERSION.saturating_add(1));
     backend
         .seed_object(
             RUSTFS_META_BUCKET,
@@ -14545,6 +14947,7 @@ async fn strong_catalog_snapshot_rejects_corrupt_resource_ownership() {
         default_table_metadata_file_path(&namespace, &orders, "00001.metadata.json"),
     );
     let resource_backed_snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: Vec::new(),
@@ -14572,6 +14975,7 @@ async fn strong_catalog_snapshot_rejects_corrupt_resource_ownership() {
     );
     inactive_resource.state = TableCatalogEntryState::Deleted;
     let inactive_resource_snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: Vec::new(),
@@ -14587,6 +14991,7 @@ async fn strong_catalog_snapshot_rejects_corrupt_resource_ownership() {
     let mut inactive_parent = test_namespace_entry(bucket, &namespace);
     inactive_parent.state = TableCatalogEntryState::Deleted;
     let inactive_parent_snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![inactive_parent, test_namespace_entry(bucket, &child)],
@@ -14601,6 +15006,7 @@ async fn strong_catalog_snapshot_rejects_corrupt_resource_ownership() {
     let mut inactive_bucket = test_bucket_entry(bucket);
     inactive_bucket.state = TableCatalogEntryState::Deleted;
     let inactive_bucket_snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![inactive_bucket],
         namespaces: vec![test_namespace_entry(bucket, &namespace)],
@@ -14661,6 +15067,7 @@ async fn strong_catalog_v1_inactive_resources_are_hidden_and_cleanup_only() {
     view_entry.warehouse_location = "legacy-invalid-view-location".to_string();
     view_entry.metadata_location = "legacy-invalid-view-metadata".to_string();
     let snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: Vec::new(),
@@ -14727,6 +15134,7 @@ async fn strong_catalog_snapshot_rejects_mismatched_commit_indexes() {
         StrongCommitSnapshotRecord::new_for_test(bucket.to_string(), table_entry.table_id.clone(), lookup_key.to_string(), commit)
     };
     let snapshot = |commits, idempotency| StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![test_namespace_entry(bucket, &namespace)],
@@ -14787,6 +15195,7 @@ async fn strong_catalog_snapshot_rejects_commit_outside_current_history() {
         updated_at: None,
     };
     let snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![test_namespace_entry(bucket, &namespace)],
@@ -14837,6 +15246,7 @@ async fn strong_catalog_snapshot_discards_dropped_table_commit_indexes() {
         )
     };
     let snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![test_namespace_entry(bucket, &namespace)],
@@ -17198,6 +17608,7 @@ async fn strong_catalog_rejects_mismatched_namespace_storage_identity() {
     let mut entry = test_namespace_entry(bucket, &namespace);
     entry.namespace_id = "sales.daily".to_string();
     let snapshot = StrongTableCatalogSnapshot {
+        archives: None,
         version: STRONG_TABLE_CATALOG_SNAPSHOT_VERSION,
         table_buckets: vec![test_bucket_entry(bucket)],
         namespaces: vec![entry],

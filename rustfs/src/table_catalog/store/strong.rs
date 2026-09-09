@@ -14,6 +14,9 @@
 
 use super::*;
 
+mod archive;
+use archive::{StrongCommitArchive, StrongReceiptArchive};
+
 pub(in crate::table_catalog) type StrongNamespaceKey = (String, String);
 type StrongResourceKey = (String, String, String);
 type StrongCommitKey = (String, String, String);
@@ -28,9 +31,42 @@ struct StrongSnapshotObservation {
 }
 pub(in crate::table_catalog) const STRONG_TABLE_CATALOG_RELOAD_MAX_ATTEMPTS: usize = 3;
 pub(in crate::table_catalog) const STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE: usize = 64 * 1024 * 1024;
+const STRONG_SNAPSHOT_ADMISSION_SIZE: usize = 56 * 1024 * 1024;
+const STRONG_SNAPSHOT_WARNING_SIZE: usize = 48 * 1024 * 1024;
+pub(in crate::table_catalog) const STRONG_SNAPSHOT_ARCHIVE_VERSION: u16 = 3;
+const STRONG_INLINE_COMMIT_RETENTION: usize = 32;
+const STRONG_ARCHIVE_BATCH_LIMIT: usize = 128;
+const STRONG_AUTO_ARCHIVE_BATCH_LIMIT: usize = 1;
 
-pub(in crate::table_catalog) fn strong_snapshot_write_version(version_two_requested: bool, fleet_confirmed: bool) -> u16 {
-    if version_two_requested && fleet_confirmed {
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct TableCatalogCapacityReport {
+    snapshot_version: Option<u16>,
+    snapshot_bytes: usize,
+    warning_bytes: usize,
+    admission_bytes: usize,
+    maximum_bytes: usize,
+    warning: bool,
+    table_count: usize,
+    namespace_count: usize,
+    view_count: usize,
+    online_receipts: usize,
+    archived_receipts: u64,
+    pending_archive_receipts: usize,
+    inline_retention: usize,
+    archive_batch_limit: usize,
+    automatic_archive_batch_limit: usize,
+}
+
+pub(in crate::table_catalog) fn strong_snapshot_write_version(
+    version_two_requested: bool,
+    fleet_confirmed: bool,
+    version_three_requested: bool,
+    version_three_fleet_confirmed: bool,
+) -> u16 {
+    if version_three_requested && version_three_fleet_confirmed {
+        STRONG_SNAPSHOT_ARCHIVE_VERSION
+    } else if version_two_requested && fleet_confirmed {
         STRONG_TABLE_CATALOG_SNAPSHOT_VERSION
     } else {
         STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION
@@ -52,6 +88,7 @@ pub(in crate::table_catalog) struct StrongTableCatalogState {
     snapshot_required: bool,
     pub(in crate::table_catalog) snapshot_etag: Option<String>,
     snapshot_version: Option<u16>,
+    snapshot_bytes: usize,
     pub(in crate::table_catalog) table_buckets: BTreeMap<String, TableBucketEntry>,
     pub(in crate::table_catalog) namespaces: BTreeMap<StrongNamespaceKey, NamespaceEntry>,
     namespace_children: BTreeMap<StrongNamespaceChildKey, String>,
@@ -60,6 +97,7 @@ pub(in crate::table_catalog) struct StrongTableCatalogState {
     pub(super) views: BTreeMap<StrongResourceKey, ViewEntry>,
     pub(super) commits: BTreeMap<StrongCommitKey, CommitLogEntry>,
     pub(super) idempotency: BTreeMap<StrongCommitKey, CommitLogEntry>,
+    archives: BTreeMap<(String, String), StrongCommitArchive>,
     pub(super) warehouse_index: StrongWarehouseIndex,
     identifier_collisions: BTreeSet<StrongResourceKey>,
 }
@@ -100,6 +138,8 @@ pub(in crate::table_catalog) struct StrongTableCatalogSnapshot {
     pub(in crate::table_catalog) views: Vec<ViewEntry>,
     pub(in crate::table_catalog) commits: Vec<StrongCommitSnapshotRecord>,
     pub(in crate::table_catalog) idempotency: Vec<StrongCommitSnapshotRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::table_catalog) archives: Option<Vec<StrongCommitArchive>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -110,6 +150,8 @@ pub(in crate::table_catalog) struct StrongTableCatalogBucketSnapshot {
     pub(super) views: Vec<ViewEntry>,
     pub(super) commits: Vec<StrongCommitSnapshotRecord>,
     pub(super) idempotency: Vec<StrongCommitSnapshotRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) archives: Vec<StrongCommitArchive>,
 }
 
 #[derive(Clone)]
@@ -139,6 +181,10 @@ enum StrongSnapshotWritePostcondition {
         commit: CommitLogEntry,
     },
     BucketSnapshotPresent(StrongTableCatalogBucketSnapshot),
+    ArchivesCompacted {
+        table_bucket: String,
+        roots: Vec<StrongCommitArchive>,
+    },
 }
 
 impl StrongSnapshotWritePostcondition {
@@ -232,6 +278,15 @@ impl StrongSnapshotWritePostcondition {
                     .as_ref()
                     == Some(expected)
             }
+            Self::ArchivesCompacted { table_bucket, roots } => {
+                state
+                    .snapshot_version
+                    .is_some_and(|version| version >= STRONG_SNAPSHOT_ARCHIVE_VERSION)
+                    && state.table_buckets.contains_key(table_bucket)
+                    && roots
+                        .iter()
+                        .all(|root| state.archives.get(&(root.table_bucket.clone(), root.table_id.clone())) == Some(root))
+            }
         }
     }
 }
@@ -246,6 +301,7 @@ impl StrongTableCatalogBucketSnapshot {
             views: Vec::new(),
             commits: Vec::new(),
             idempotency: Vec::new(),
+            archives: Vec::new(),
         }
     }
 
@@ -342,6 +398,8 @@ where
         let snapshot_write_version = strong_snapshot_write_version(
             rustfs_utils::get_env_bool(ENV_TABLE_CATALOG_STRONG_SNAPSHOT_V2, false),
             rustfs_utils::get_env_bool(ENV_TABLE_CATALOG_STRONG_SNAPSHOT_V2_FLEET_CONFIRMED, false),
+            rustfs_utils::get_env_bool(ENV_TABLE_CATALOG_STRONG_SNAPSHOT_V3, false),
+            rustfs_utils::get_env_bool(ENV_TABLE_CATALOG_STRONG_SNAPSHOT_V3_FLEET_CONFIRMED, false),
         );
         // RUSTFS_COMPAT_TODO(table-catalog-strong-snapshot-v1): Keep version 1 writes during mixed-version rollout. Remove after all supported releases read version 2 and every retained snapshot is upgraded.
         // Remove after the minimum supported release reads version 2 and operators no longer need collision cleanup.
@@ -559,6 +617,13 @@ where
         self.object_backend.acquire_read_lock(RUSTFS_META_BUCKET, &lock_path).await
     }
 
+    async fn acquire_local_write(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        let started = Instant::now();
+        let guard = self.write_lock.lock().await;
+        histogram!("table_catalog_strong_write_lock_wait_seconds").record(started.elapsed().as_secs_f64());
+        guard
+    }
+
     fn effective_snapshot_write_version(state: &StrongTableCatalogState, configured_write_version: u16) -> u16 {
         state
             .snapshot_version
@@ -593,6 +658,7 @@ where
                     commit: commit.clone(),
                 })
                 .collect(),
+            archives: (snapshot_version >= STRONG_SNAPSHOT_ARCHIVE_VERSION).then(|| state.archives.values().cloned().collect()),
         }
     }
 
@@ -643,6 +709,12 @@ where
                     commit: commit.clone(),
                 })
                 .collect(),
+            archives: state
+                .archives
+                .iter()
+                .filter(|((bucket, _), _)| bucket == table_bucket)
+                .map(|(_, archive)| archive.clone())
+                .collect(),
         })
     }
 
@@ -662,6 +734,7 @@ where
             .idempotency
             .retain(|(entry_bucket, _, _), _| entry_bucket != table_bucket);
         state.warehouse_index.remove(table_bucket);
+        state.archives.retain(|(bucket, _), _| bucket != table_bucket);
         state
             .identifier_collisions
             .retain(|(entry_bucket, _, _)| entry_bucket != table_bucket);
@@ -678,6 +751,7 @@ where
             snapshot.views.len(),
             snapshot.commits.len(),
             snapshot.idempotency.len(),
+            snapshot.archives.len(),
         );
         let table_bucket = snapshot.table_bucket.table_bucket.clone();
         let unexpected_owner = snapshot
@@ -696,13 +770,18 @@ where
         }
         let validated = Self::state_from_snapshot(
             StrongTableCatalogSnapshot {
-                version: STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION,
+                version: if snapshot.archives.is_empty() {
+                    STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION
+                } else {
+                    STRONG_SNAPSHOT_ARCHIVE_VERSION
+                },
                 table_buckets: vec![snapshot.table_bucket],
                 namespaces: snapshot.namespaces,
                 tables: snapshot.tables,
                 views: snapshot.views,
                 commits: snapshot.commits,
                 idempotency: snapshot.idempotency,
+                archives: (!snapshot.archives.is_empty()).then_some(snapshot.archives),
             },
             None,
         )?;
@@ -713,6 +792,7 @@ where
             validated.views.len(),
             validated.commits.len(),
             validated.idempotency.len(),
+            validated.archives.len(),
         );
         if validated_counts != expected_counts {
             return Err(TableCatalogStoreError::Invalid(
@@ -726,6 +806,7 @@ where
         state.views.extend(validated.views);
         state.commits.extend(validated.commits);
         state.idempotency.extend(validated.idempotency);
+        state.archives.extend(validated.archives);
         Self::rebuild_namespace_indexes_locked(state)?;
         Self::rebuild_warehouse_index_locked(state)?;
         Ok(())
@@ -991,6 +1072,11 @@ where
         } else {
             STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION
         };
+        if snapshot_version < STRONG_SNAPSHOT_ARCHIVE_VERSION && !state.archives.is_empty() {
+            return Err(TableCatalogStoreError::Unsupported(
+                "receipt archives require a version 3 destination".to_string(),
+            ));
+        }
         if snapshot_version >= STRONG_TABLE_CATALOG_SNAPSHOT_VERSION {
             Self::validate_inactive_resource_locations_locked(state)?;
         }
@@ -1004,7 +1090,7 @@ where
         snapshot: StrongTableCatalogSnapshot,
         snapshot_etag: Option<String>,
     ) -> TableCatalogStoreResult<StrongTableCatalogState> {
-        if !(STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION..=STRONG_TABLE_CATALOG_SNAPSHOT_VERSION).contains(&snapshot.version) {
+        if !(STRONG_TABLE_CATALOG_SNAPSHOT_MIN_READ_VERSION..=STRONG_SNAPSHOT_ARCHIVE_VERSION).contains(&snapshot.version) {
             return Err(TableCatalogStoreError::Invalid(format!(
                 "unsupported strong catalog snapshot version: {}",
                 snapshot.version
@@ -1090,6 +1176,34 @@ where
                 ));
             }
         }
+        if snapshot_version < STRONG_SNAPSHOT_ARCHIVE_VERSION && snapshot.archives.is_some() {
+            return Err(TableCatalogStoreError::Invalid(
+                "receipt archive index requires snapshot version 3".to_string(),
+            ));
+        }
+        if snapshot_version >= STRONG_SNAPSHOT_ARCHIVE_VERSION && snapshot.archives.is_none() {
+            return Err(TableCatalogStoreError::Invalid(
+                "version 3 snapshot is missing its receipt archive index".to_string(),
+            ));
+        }
+        for archive in snapshot.archives.into_iter().flatten() {
+            if snapshot_version < STRONG_SNAPSHOT_ARCHIVE_VERSION
+                || archive.receipts == 0
+                || !archive::valid_digest(&archive.root)
+                || !table_ids.contains(&(archive.table_bucket.clone(), archive.table_id.clone()))
+            {
+                return Err(TableCatalogStoreError::Invalid(
+                    "invalid durable catalog receipt archive owner, version, or root".to_string(),
+                ));
+            }
+            if state
+                .archives
+                .insert((archive.table_bucket.clone(), archive.table_id.clone()), archive)
+                .is_some()
+            {
+                return Err(TableCatalogStoreError::Invalid("duplicate durable catalog receipt archive".to_string()));
+            }
+        }
         for record in snapshot.commits {
             validate_catalog_entry_version("commit log", record.commit.version)?;
             if record.commit.table_id != record.table_id || record.commit.commit_id != record.lookup_key {
@@ -1161,6 +1275,15 @@ where
         }
         for table in state.tables.values() {
             let table_commits = Self::table_commits_locked(&state, &table.table_bucket, &table.table_id).collect::<Vec<_>>();
+            if state
+                .archives
+                .contains_key(&(table.table_bucket.clone(), table.table_id.clone()))
+                && !table_commits.iter().any(|commit| table_matches_committed_log(table, commit))
+            {
+                return Err(TableCatalogStoreError::Invalid(
+                    "archived table has no online current commit receipt".to_string(),
+                ));
+            }
             let history = TableCommitHistoryIndex::new(table, table_commits.iter().copied());
             if let Some(commit) = table_commits
                 .into_iter()
@@ -1216,7 +1339,18 @@ where
         let snapshot_etag = Self::snapshot_etag(snapshot_object.etag)?;
         let snapshot = serde_json::from_slice::<StrongTableCatalogSnapshot>(&snapshot_object.data)
             .map_err(|err| TableCatalogStoreError::Internal(format!("failed to decode strong catalog snapshot: {err}")))?;
-        Self::state_from_snapshot(snapshot, Some(snapshot_etag))
+        let mut state = Self::state_from_snapshot(snapshot, Some(snapshot_etag))?;
+        state.snapshot_bytes = snapshot_object.data.len();
+        metrics::gauge!("table_catalog_strong_snapshot_bytes").set(state.snapshot_bytes as f64);
+        metrics::gauge!("table_catalog_strong_online_receipts").set(state.commits.len() as f64);
+        metrics::gauge!("table_catalog_strong_archived_receipts")
+            .set(state.archives.values().map(|archive| archive.receipts as f64).sum::<f64>());
+        metrics::gauge!("table_catalog_strong_capacity_warning").set(if state.snapshot_bytes >= STRONG_SNAPSHOT_WARNING_SIZE {
+            1.0
+        } else {
+            0.0
+        });
+        Ok(state)
     }
 
     async fn mark_snapshot_reload_failed(&self, err: &TableCatalogStoreError, phase: &'static str) {
@@ -1252,6 +1386,7 @@ where
     }
 
     pub(in crate::table_catalog) async fn reload_state_from_durable(&self) -> TableCatalogStoreResult<()> {
+        let started = Instant::now();
         let initial_observation = {
             let state = self.state.lock().await;
             Self::snapshot_observation_locked(&state)
@@ -1323,6 +1458,7 @@ where
                 )));
             }
             *state = loaded_state;
+            histogram!("table_catalog_strong_snapshot_reload_seconds").record(started.elapsed().as_secs_f64());
             return Ok(());
         }
         Err(TableCatalogStoreError::Internal(
@@ -1330,24 +1466,236 @@ where
         ))
     }
 
-    async fn finalize_snapshot_write(
+    async fn compact_snapshot(
         &self,
-        snapshot: StrongTableCatalogSnapshot,
-        precondition: TableCatalogPutPrecondition,
-        postcondition: StrongSnapshotWritePostcondition,
+        snapshot: &mut StrongTableCatalogSnapshot,
+        postcondition: &StrongSnapshotWritePostcondition,
     ) -> TableCatalogStoreResult<()> {
-        let data = serde_json::to_vec(&snapshot)
-            .map_err(|err| TableCatalogStoreError::Internal(format!("failed to encode strong catalog snapshot: {err}")))?;
-        if data.len() > STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE {
+        if snapshot.version < STRONG_SNAPSHOT_ARCHIVE_VERSION {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let archives = snapshot.archives.as_mut().ok_or_else(|| {
+            TableCatalogStoreError::Internal("version 3 snapshot is missing its receipt archive index".to_string())
+        })?;
+        let (bucket, table_id) = match postcondition {
+            StrongSnapshotWritePostcondition::CommitPresent {
+                table_bucket, table_id, ..
+            } => (table_bucket, Some(table_id)),
+            StrongSnapshotWritePostcondition::ArchivesCompacted { table_bucket, .. } => (table_bucket, None),
+            _ => return Ok(()),
+        };
+        let batch_limit = if table_id.is_some() {
+            STRONG_AUTO_ARCHIVE_BATCH_LIMIT
+        } else {
+            STRONG_ARCHIVE_BATCH_LIMIT
+        };
+        let candidates = {
+            let state = self.state.lock().await;
+            let mut candidates = Vec::new();
+            for table in snapshot
+                .tables
+                .iter()
+                .filter(|entry| entry.table_bucket == *bucket && table_id.is_none_or(|id| entry.table_id == *id))
+            {
+                let commits: Vec<_> = snapshot
+                    .commits
+                    .iter()
+                    .filter(|record| record.table_bucket == *bucket && record.table_id == table.table_id)
+                    .collect();
+                // Recovery must retain its complete online evidence chain.
+                if commits
+                    .iter()
+                    .any(|record| !matches!(record.commit.status, CommitLogStatus::Committed))
+                {
+                    continue;
+                }
+                let by_state: BTreeMap<_, _> = commits
+                    .iter()
+                    .map(|record| {
+                        (
+                            (record.commit.new_version_token.as_str(), record.commit.new_metadata_location.as_str()),
+                            *record,
+                        )
+                    })
+                    .collect();
+                let mut pointer = (table.version_token.as_str(), table.metadata_location.as_str());
+                let mut chain = Vec::new();
+                while let Some(record) = by_state.get(&pointer) {
+                    if chain.len() >= commits.len() {
+                        return Err(TableCatalogStoreError::Invalid("cycle in receipt archival chain".to_string()));
+                    }
+                    chain.push(*record);
+                    pointer = (&record.commit.expected_version_token, &record.commit.previous_metadata_location);
+                }
+                if chain.len() != commits.len() {
+                    return Err(TableCatalogStoreError::Invalid("disconnected receipt archival chain".to_string()));
+                }
+                for record in chain.into_iter().skip(STRONG_INLINE_COMMIT_RETENTION).rev() {
+                    let key = Self::commit_key(bucket, &table.table_id, &record.lookup_key);
+                    if state.commits.get(&key) != Some(&record.commit) {
+                        break;
+                    }
+                    candidates.push(record.clone());
+                    if candidates.len() == batch_limit {
+                        break;
+                    }
+                }
+                if candidates.len() == batch_limit {
+                    break;
+                }
+            }
+            candidates
+        };
+        for record in candidates {
+            let archive = StrongReceiptArchive::new(&self.object_backend, &record.table_bucket, &record.table_id);
+            let index = archives
+                .iter()
+                .position(|entry| entry.table_bucket == record.table_bucket && entry.table_id == record.table_id);
+            let previous = index.map(|index| &archives[index]);
+            let count = previous
+                .map_or(0, |entry| entry.receipts)
+                .checked_add(1)
+                .ok_or_else(|| TableCatalogStoreError::Internal("archived receipt count overflow".to_string()))?;
+            let mut root = archive
+                .insert(previous.map(|entry| entry.root.as_str()), &record.commit, false)
+                .await?;
+            if previous.is_some_and(|entry| entry.root == root) {
+                return Err(TableCatalogStoreError::Internal(
+                    "online receipt already exists in the archive index".to_string(),
+                ));
+            }
+            if record.commit.idempotency_key.is_some() {
+                root = archive.insert(Some(&root), &record.commit, true).await?;
+            }
+            let next = StrongCommitArchive {
+                table_bucket: record.table_bucket.clone(),
+                table_id: record.table_id.clone(),
+                root,
+                receipts: count,
+            };
+            match index {
+                Some(index) => archives[index] = next,
+                None => archives.push(next),
+            }
+            snapshot.commits.retain(|candidate| {
+                candidate.table_bucket != record.table_bucket
+                    || candidate.table_id != record.table_id
+                    || candidate.lookup_key != record.lookup_key
+            });
+            snapshot.idempotency.retain(|candidate| {
+                candidate.table_bucket != record.table_bucket
+                    || candidate.table_id != record.table_id
+                    || candidate.commit.commit_id != record.lookup_key
+            });
+        }
+        histogram!("table_catalog_strong_archive_prepare_seconds").record(started.elapsed().as_secs_f64());
+        Ok(())
+    }
+
+    fn validate_snapshot_capacity(size: usize, previous_size: usize, governance: bool) -> TableCatalogStoreResult<()> {
+        if size > STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE {
             return Err(TableCatalogStoreError::Invalid(format!(
                 "durable strong catalog snapshot exceeds the maximum encoded size of {STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE} bytes"
             )));
         }
-        match self
+        if size > STRONG_SNAPSHOT_ADMISSION_SIZE && size > previous_size && !governance {
+            counter!("table_catalog_strong_capacity_rejections_total").increment(1);
+            return Err(TableCatalogStoreError::Unavailable(
+                "durable catalog admission budget exhausted; compact receipts or reduce catalog state before retrying"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn snapshot_write_succeeded(&self, postcondition: &StrongSnapshotWritePostcondition) -> TableCatalogStoreResult<bool> {
+        let archive = {
+            let state = self.state.lock().await;
+            if postcondition.is_satisfied_by::<B>(&state) {
+                return Ok(true);
+            }
+            let StrongSnapshotWritePostcondition::CommitPresent {
+                table_bucket,
+                table_id,
+                commit,
+            } = postcondition
+            else {
+                return Ok(false);
+            };
+            let active = state.tables.values().any(|table| {
+                table.table_bucket == *table_bucket
+                    && table.table_id == *table_id
+                    && table.state == TableCatalogEntryState::Active
+                    && !table_matches_staged_base(table, commit)
+            });
+            if !active {
+                return Ok(false);
+            }
+            state.archives.get(&(table_bucket.clone(), table_id.clone())).cloned()
+        };
+        let (Some(archive), StrongSnapshotWritePostcondition::CommitPresent { commit, .. }) = (archive, postcondition) else {
+            return Ok(false);
+        };
+        let lookup = StrongReceiptArchive::new(&self.object_backend, &archive.table_bucket, &archive.table_id);
+        if lookup.lookup(&archive.root, &commit.commit_id, false).await?.as_ref() != Some(commit) {
+            return Ok(false);
+        }
+        if let Some(key) = commit.idempotency_key.as_deref() {
+            return Ok(lookup.lookup(&archive.root, key, true).await?.as_ref() == Some(commit));
+        }
+        Ok(true)
+    }
+
+    async fn finalize_snapshot_write(
+        &self,
+        mut snapshot: StrongTableCatalogSnapshot,
+        precondition: TableCatalogPutPrecondition,
+        mut postcondition: StrongSnapshotWritePostcondition,
+    ) -> TableCatalogStoreResult<()> {
+        let started = Instant::now();
+        if matches!(postcondition, StrongSnapshotWritePostcondition::ArchivesCompacted { .. }) {
+            self.compact_snapshot(&mut snapshot, &postcondition).await?;
+        }
+        if let StrongSnapshotWritePostcondition::ArchivesCompacted { table_bucket, roots } = &mut postcondition {
+            *roots = snapshot
+                .archives
+                .iter()
+                .flatten()
+                .filter(|archive| archive.table_bucket == *table_bucket)
+                .cloned()
+                .collect();
+        }
+        let data = serde_json::to_vec(&snapshot)
+            .map_err(|err| TableCatalogStoreError::Internal(format!("failed to encode strong catalog snapshot: {err}")))?;
+        let (previous_size, governance) = {
+            let state = self.state.lock().await;
+            let governance = match &postcondition {
+                StrongSnapshotWritePostcondition::TableRenamed { .. }
+                | StrongSnapshotWritePostcondition::ArchivesCompacted { .. } => true,
+                StrongSnapshotWritePostcondition::CommitPresent {
+                    table_bucket,
+                    table_id,
+                    commit,
+                } => state
+                    .commits
+                    .contains_key(&Self::commit_key(table_bucket, table_id, &commit.commit_id)),
+                _ => false,
+            };
+            (state.snapshot_bytes, governance)
+        };
+        Self::validate_snapshot_capacity(data.len(), previous_size, governance)?;
+        histogram!("table_catalog_strong_snapshot_prepare_seconds").record(started.elapsed().as_secs_f64());
+        counter!("table_catalog_strong_snapshot_write_bytes_total").increment(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        let cas_started = Instant::now();
+        let result = self
             .object_backend
             .put_object(RUSTFS_META_BUCKET, &Self::snapshot_object_path(), data, precondition)
-            .await
-        {
+            .await;
+        histogram!("table_catalog_strong_snapshot_cas_seconds").record(cas_started.elapsed().as_secs_f64());
+        counter!("table_catalog_strong_snapshot_writes_total", "result" => table_catalog_store_result_label(&result))
+            .increment(1);
+        match result {
             Ok(()) => {
                 self.state.lock().await.snapshot_required = true;
                 if let Err(err) = self.reload_state_from_durable().await {
@@ -1366,8 +1714,7 @@ where
                 self.state.lock().await.snapshot_required = true;
                 match self.reload_state_from_durable().await {
                     Ok(()) => {
-                        let state = self.state.lock().await;
-                        if postcondition.is_satisfied_by::<B>(&state) {
+                        if self.snapshot_write_succeeded(&postcondition).await? {
                             Ok(())
                         } else {
                             Err(err)
@@ -1386,7 +1733,7 @@ where
         &self,
         source: StrongTableCatalogBucketSnapshot,
     ) -> TableCatalogStoreResult<(String, bool)> {
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let table_bucket = source.table_bucket.table_bucket.clone();
         let (snapshot, precondition, postcondition) = {
@@ -1427,7 +1774,7 @@ where
         table_bucket: &str,
         expected_fingerprint: &str,
     ) -> TableCatalogStoreResult<()> {
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let (snapshot, precondition, postcondition) = {
             let state = self.state.lock().await;
@@ -1451,7 +1798,7 @@ where
     }
 
     pub(super) async fn restore_absent_migration_snapshot_baseline(&self) -> TableCatalogStoreResult<()> {
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         let _reload_guard = self.reload_lock.lock().await;
         let snapshot_object = self
             .object_backend
@@ -1719,6 +2066,79 @@ where
         Ok(current)
     }
 
+    async fn archived_commit_replay(
+        &self,
+        key: &StrongResourceKey,
+        request: &TableCommitRequest,
+    ) -> TableCatalogStoreResult<Option<TableCommitResult>> {
+        let (current, root, inline, indexed) = {
+            let state = self.state.lock().await;
+            Self::ensure_identifier_is_unambiguous_locked(&state, key)?;
+            let Some(current) = state
+                .tables
+                .get(key)
+                .filter(|table| table.state == TableCatalogEntryState::Active)
+            else {
+                return Ok(None);
+            };
+            let Some(root) = state.archives.get(&(request.table_bucket.clone(), current.table_id.clone())) else {
+                return Ok(None);
+            };
+            let inline = state
+                .commits
+                .get(&Self::commit_key(&request.table_bucket, &current.table_id, &request.commit_id))
+                .cloned();
+            let indexed = request
+                .idempotency_key
+                .as_deref()
+                .and_then(|id| {
+                    state
+                        .idempotency
+                        .get(&Self::idempotency_key(&request.table_bucket, &current.table_id, id))
+                })
+                .cloned();
+            (current.clone(), root.root.clone(), inline, indexed)
+        };
+        let archive = StrongReceiptArchive::new(&self.object_backend, &request.table_bucket, &current.table_id);
+        let archived = if inline.is_none() {
+            archive.lookup(&root, &request.commit_id, false).await?
+        } else {
+            None
+        };
+        let indexed = match (indexed, request.idempotency_key.as_deref()) {
+            (None, Some(id)) => archive.lookup(&root, id, true).await?,
+            (indexed, _) => indexed,
+        };
+        if indexed
+            .as_ref()
+            .is_some_and(|commit| !commit_log_matches_request(commit, request, &current.table_id))
+        {
+            return Err(TableCatalogStoreError::Conflict("idempotency key already exists".to_string()));
+        }
+        if let Some(commit) = archived {
+            if !commit_log_matches_request(&commit, request, &current.table_id) {
+                return Err(TableCatalogStoreError::Conflict("archived commit id already exists".to_string()));
+            }
+            if (commit.idempotency_key.is_some() && indexed.as_ref() != Some(&commit))
+                || table_matches_staged_base(&current, &commit)
+            {
+                return Err(TableCatalogStoreError::Internal(
+                    "archived commit and current catalog state disagree".to_string(),
+                ));
+            }
+            return Ok(Some(TableCommitResult {
+                table: current,
+                commit_log: commit,
+            }));
+        }
+        if inline.is_none() && indexed.is_some() {
+            return Err(TableCatalogStoreError::Internal(
+                "archived idempotency key has no commit receipt".to_string(),
+            ));
+        }
+        Ok(None)
+    }
+
     fn committed_existing_result_locked(
         state: &mut StrongTableCatalogState,
         request: &TableCommitRequest,
@@ -1846,6 +2266,73 @@ where
         };
         Ok(Self::table_commit_recovery_report_for_entry_locked(&state, entry))
     }
+
+    pub(crate) async fn catalog_capacity(&self, table_bucket: &str) -> TableCatalogStoreResult<TableCatalogCapacityReport> {
+        self.hydrate_state().await?;
+        let state = self.state.lock().await;
+        Self::require_table_bucket_in_state(&state, table_bucket)?;
+        let mut pending_archive_receipts = 0;
+        for table in state.tables.values().filter(|table| table.table_bucket == table_bucket) {
+            let commits: Vec<_> = Self::table_commits_locked(&state, table_bucket, &table.table_id).collect();
+            if commits
+                .iter()
+                .all(|commit| matches!(commit.status, CommitLogStatus::Committed))
+            {
+                pending_archive_receipts += commits.len().saturating_sub(STRONG_INLINE_COMMIT_RETENTION);
+            }
+        }
+        Ok(TableCatalogCapacityReport {
+            snapshot_version: state.snapshot_version,
+            snapshot_bytes: state.snapshot_bytes,
+            warning_bytes: STRONG_SNAPSHOT_WARNING_SIZE,
+            admission_bytes: STRONG_SNAPSHOT_ADMISSION_SIZE,
+            maximum_bytes: STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE,
+            warning: state.snapshot_bytes >= STRONG_SNAPSHOT_WARNING_SIZE,
+            table_count: state.tables.len(),
+            namespace_count: state.namespaces.len(),
+            view_count: state.views.len(),
+            online_receipts: state.commits.len(),
+            archived_receipts: state
+                .archives
+                .values()
+                .try_fold(0_u64, |count, archive| count.checked_add(archive.receipts))
+                .ok_or_else(|| TableCatalogStoreError::Internal("archived receipt count overflow".to_string()))?,
+            pending_archive_receipts,
+            inline_retention: STRONG_INLINE_COMMIT_RETENTION,
+            archive_batch_limit: STRONG_ARCHIVE_BATCH_LIMIT,
+            automatic_archive_batch_limit: STRONG_AUTO_ARCHIVE_BATCH_LIMIT,
+        })
+    }
+
+    pub(crate) async fn compact_catalog(&self, table_bucket: &str) -> TableCatalogStoreResult<TableCatalogCapacityReport> {
+        let _migration_guard = self.acquire_snapshot_write_permit().await?;
+        let _write_guard = self.acquire_local_write().await;
+        self.hydrate_state().await?;
+        let (snapshot, precondition) = {
+            let state = self.state.lock().await;
+            Self::require_table_bucket_in_state(&state, table_bucket)?;
+            if Self::effective_snapshot_write_version(&state, self.snapshot_write_version) < STRONG_SNAPSHOT_ARCHIVE_VERSION {
+                return Err(TableCatalogStoreError::Unsupported(
+                    "receipt archival requires fleet-confirmed snapshot version 3".to_string(),
+                ));
+            }
+            let (precondition, mut draft) = Self::snapshot_draft_context_locked(&state);
+            (
+                Self::snapshot_from_mutated_state_locked(&mut draft, self.snapshot_write_version)?,
+                precondition,
+            )
+        };
+        self.finalize_snapshot_write(
+            snapshot,
+            precondition,
+            StrongSnapshotWritePostcondition::ArchivesCompacted {
+                table_bucket: table_bucket.to_string(),
+                roots: Vec::new(),
+            },
+        )
+        .await?;
+        self.catalog_capacity(table_bucket).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -1861,7 +2348,7 @@ where
 
     async fn put_table_bucket(&self, entry: TableBucketEntry) -> TableCatalogStoreResult<()> {
         let _migration_guard = self.acquire_snapshot_write_permit().await?;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         validate_table_bucket_entry(&entry)?;
 
@@ -1880,7 +2367,7 @@ where
 
     async fn create_namespace(&self, entry: NamespaceEntry) -> TableCatalogStoreResult<()> {
         let _migration_guard = self.acquire_snapshot_write_permit().await?;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let namespace = validate_namespace_entry_identity(&entry)?;
         validate_namespace_properties(&entry.properties)?;
@@ -2033,7 +2520,7 @@ where
         update: NamespacePropertiesUpdate,
     ) -> TableCatalogStoreResult<NamespacePropertiesUpdateResult> {
         let _migration_guard = self.acquire_snapshot_write_permit().await?;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let namespace = parse_namespace_for_store(namespace)?;
         let key = Self::namespace_key(table_bucket, &namespace);
@@ -2077,7 +2564,7 @@ where
 
     async fn drop_namespace(&self, table_bucket: &str, namespace: &str) -> TableCatalogStoreResult<()> {
         let _migration_guard = self.acquire_snapshot_write_permit().await?;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let namespace = parse_namespace_for_store(namespace)?;
         let key = Self::namespace_key(table_bucket, &namespace);
@@ -2170,7 +2657,7 @@ where
                 "table registration requires a table publication fence".to_string(),
             ));
         }
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let key = Self::table_key(&entry.table_bucket, &namespace, &table);
         let publication_identity = (entry.table_bucket.clone(), entry.namespace.clone(), entry.table.clone());
@@ -2307,7 +2794,7 @@ where
         }
         let _publication_completion = TableCommitPublicationCompletion::new(&publication);
         let _migration_guard = self.acquire_snapshot_write_permit().await?;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
 
         let source_namespace = parse_namespace_for_store(source_namespace)?;
@@ -2454,9 +2941,21 @@ where
             ));
         }
         let _publication_completion = TableCommitPublicationCompletion::new(publication);
-        let write_guard = self.write_lock.lock().await;
+        let write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let key = Self::table_key(&request.table_bucket, &namespace, &table);
+
+        if let Some(result) = self.archived_commit_replay(&key, &request).await? {
+            return table_commit_result(
+                &request.table_bucket,
+                &request.namespace,
+                &request.table,
+                &request.commit_id,
+                &request.operation,
+                commit_started,
+                Ok(result),
+            );
+        }
 
         let committed_existing_result = {
             let state = self.state.lock().await;
@@ -2488,9 +2987,11 @@ where
         };
         if let Some(prepared_result) = committed_existing_result {
             let result = match prepared_result {
-                Ok((result, Some((snapshot, precondition)))) => {
+                Ok((result, Some((mut snapshot, precondition)))) => {
                     let postcondition = Self::commit_write_postcondition(&request.table_bucket, &result.commit_log);
-                    if !publication.holds_table(&request.table_bucket, &request.namespace, &request.table) {
+                    if let Err(error) = self.compact_snapshot(&mut snapshot, &postcondition).await {
+                        Err(error)
+                    } else if !publication.holds_table(&request.table_bucket, &request.namespace, &request.table) {
                         Err(TableCatalogStoreError::Internal(
                             "table commit publication fence was lost before snapshot update".to_string(),
                         ))
@@ -2541,8 +3042,19 @@ where
         })
         .await
         .map_err(|err| TableCatalogStoreError::Internal(format!("table metadata parser task failed: {err}")))??;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
+        if let Some(result) = self.archived_commit_replay(&key, &request).await? {
+            return table_commit_result(
+                &request.table_bucket,
+                &request.namespace,
+                &request.table,
+                &request.commit_id,
+                &request.operation,
+                commit_started,
+                Ok(result),
+            );
+        }
         let current_warehouse_location = {
             let state = self.state.lock().await;
             state
@@ -2585,9 +3097,11 @@ where
             }
         };
         let result = match prepared_result {
-            Ok((result, snapshot, precondition)) => {
+            Ok((result, mut snapshot, precondition)) => {
                 let postcondition = Self::commit_write_postcondition(&request.table_bucket, &result.commit_log);
-                let snapshot_result = if publication.holds_table(&request.table_bucket, &request.namespace, &request.table)
+                let snapshot_result = if let Err(error) = self.compact_snapshot(&mut snapshot, &postcondition).await {
+                    Err(error)
+                } else if publication.holds_table(&request.table_bucket, &request.namespace, &request.table)
                     && (!warehouse_relocation || publication.holds_table_bucket(&request.table_bucket))
                 {
                     self.finalize_snapshot_write(snapshot, precondition, postcondition).await
@@ -2639,7 +3153,7 @@ where
             ));
         }
         let _publication_completion = TableCommitPublicationCompletion::new(&publication);
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let namespace = parse_namespace_for_store(namespace)?;
         let table = parse_table_for_store(table)?;
@@ -2664,6 +3178,9 @@ where
             draft_state
                 .idempotency
                 .retain(|(entry_bucket, table_id, _), _| entry_bucket != table_bucket || table_id != &removed.table_id);
+            draft_state
+                .archives
+                .remove(&(table_bucket.to_string(), removed.table_id.clone()));
             (
                 Self::snapshot_from_mutated_state_locked(&mut draft_state, self.snapshot_write_version)?,
                 precondition,
@@ -2718,7 +3235,7 @@ where
                 "view creation requires a table publication fence".to_string(),
             ));
         }
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let key = Self::table_key(&entry.table_bucket, &namespace, &view);
         let publication_identity = (entry.table_bucket.clone(), entry.namespace.clone(), entry.view.clone());
@@ -2846,7 +3363,7 @@ where
                 "view replacement requires a table publication fence".to_string(),
             ));
         }
-        let write_guard = self.write_lock.lock().await;
+        let write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let key = Self::table_key(&request.table_bucket, &namespace, &view);
         let expected_view_id = {
@@ -2888,7 +3405,7 @@ where
         .await
         .map_err(|err| TableCatalogStoreError::Internal(format!("view metadata parser task failed: {err}")))??;
 
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let (snapshot, precondition, next, postcondition, warehouse_relocation) = {
             let state = self.state.lock().await;
@@ -2959,7 +3476,7 @@ where
 
     async fn drop_view(&self, table_bucket: &str, namespace: &str, view: &str) -> TableCatalogStoreResult<()> {
         let _migration_guard = self.acquire_snapshot_write_permit().await?;
-        let _write_guard = self.write_lock.lock().await;
+        let _write_guard = self.acquire_local_write().await;
         self.hydrate_state().await?;
         let namespace = parse_namespace_for_store(namespace)?;
         let view = parse_table_for_store(view)?;
@@ -2997,11 +3514,24 @@ where
         commit_id: &str,
     ) -> TableCatalogStoreResult<Option<CommitLogEntry>> {
         self.hydrate_state().await?;
-        let state = self.state.lock().await;
-        Ok(state
-            .commits
-            .get(&Self::commit_key(table_bucket, table_id, commit_id))
-            .cloned())
+        let root = {
+            let state = self.state.lock().await;
+            if let Some(commit) = state.commits.get(&Self::commit_key(table_bucket, table_id, commit_id)) {
+                return Ok(Some(commit.clone()));
+            }
+            state
+                .archives
+                .get(&(table_bucket.to_string(), table_id.to_string()))
+                .map(|archive| archive.root.clone())
+        };
+        match root {
+            Some(root) => {
+                StrongReceiptArchive::new(&self.object_backend, table_bucket, table_id)
+                    .lookup(&root, commit_id, false)
+                    .await
+            }
+            None => Ok(None),
+        }
     }
 
     async fn get_commit_by_idempotency_key(
@@ -3011,10 +3541,73 @@ where
         idempotency_key: &str,
     ) -> TableCatalogStoreResult<Option<CommitLogEntry>> {
         self.hydrate_state().await?;
-        let state = self.state.lock().await;
-        Ok(state
-            .idempotency
-            .get(&Self::idempotency_key(table_bucket, table_id, idempotency_key))
-            .cloned())
+        let root = {
+            let state = self.state.lock().await;
+            if let Some(commit) = state
+                .idempotency
+                .get(&Self::idempotency_key(table_bucket, table_id, idempotency_key))
+            {
+                return Ok(Some(commit.clone()));
+            }
+            state
+                .archives
+                .get(&(table_bucket.to_string(), table_id.to_string()))
+                .map(|archive| archive.root.clone())
+        };
+        match root {
+            Some(root) => {
+                StrongReceiptArchive::new(&self.object_backend, table_bucket, table_id)
+                    .lookup(&root, idempotency_key, true)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use crate::table_catalog::test_support::TestCatalogObjectBackend;
+
+    #[test]
+    fn legacy_destination_cannot_discard_imported_archive_roots() {
+        let mut state = StrongTableCatalogState::default();
+        state.archives.insert(
+            ("analytics".to_string(), "table-id".to_string()),
+            StrongCommitArchive {
+                table_bucket: "analytics".to_string(),
+                table_id: "table-id".to_string(),
+                root: "a".repeat(64),
+                receipts: 1,
+            },
+        );
+        assert!(matches!(
+            StrongTableCatalogStore::<TestCatalogObjectBackend>::snapshot_from_mutated_state_locked(&mut state, 2),
+            Err(TableCatalogStoreError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn capacity_budgets_preserve_governance_and_shrinking_writes() {
+        type Store = StrongTableCatalogStore<TestCatalogObjectBackend>;
+        for size in [STRONG_SNAPSHOT_ADMISSION_SIZE - 1, STRONG_SNAPSHOT_ADMISSION_SIZE] {
+            Store::validate_snapshot_capacity(size, 0, false).unwrap();
+        }
+        assert!(matches!(
+            Store::validate_snapshot_capacity(STRONG_SNAPSHOT_ADMISSION_SIZE + 1, 0, false),
+            Err(TableCatalogStoreError::Unavailable(_))
+        ));
+        for size in [
+            STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE - 1,
+            STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE,
+        ] {
+            Store::validate_snapshot_capacity(size, 0, true).unwrap();
+            Store::validate_snapshot_capacity(size, STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE, false).unwrap();
+        }
+        assert!(matches!(
+            Store::validate_snapshot_capacity(STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE + 1, usize::MAX, true),
+            Err(TableCatalogStoreError::Invalid(_))
+        ));
     }
 }

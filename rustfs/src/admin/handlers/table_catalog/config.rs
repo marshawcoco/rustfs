@@ -58,6 +58,35 @@ impl Operation for GetTableBucketHandler {
     }
 }
 
+pub struct GetTableCatalogCapacityHandler {}
+
+#[async_trait::async_trait]
+impl Operation for GetTableCatalogCapacityHandler {
+    async fn call(&self, req: S3Request<Body>, params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let warehouse = warehouse_from_params(&params)?;
+        // Capacity describes the shared snapshot, not a tenant-scoped resource.
+        authorize_table_catalog_request(&req, AdminAction::GetTableCatalogAction).await?;
+        ensure_table_bucket_enabled_from_extensions(&req.extensions, &warehouse).await?;
+        let store = table_catalog_store_from_extensions(&req.extensions)?;
+        let response = store.catalog_capacity(&warehouse).await.map_err(catalog_store_error)?;
+        build_json_response(StatusCode::OK, &response)
+    }
+}
+
+pub struct CompactTableCatalogHandler {}
+
+#[async_trait::async_trait]
+impl Operation for CompactTableCatalogHandler {
+    async fn call(&self, req: S3Request<Body>, params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let warehouse = warehouse_from_params(&params)?;
+        authorize_table_catalog_request(&req, AdminAction::MigrateTableCatalogAction).await?;
+        ensure_table_bucket_enabled_from_extensions(&req.extensions, &warehouse).await?;
+        let store = table_catalog_store_from_extensions(&req.extensions)?;
+        let response = store.compact_catalog(&warehouse).await.map_err(catalog_store_error)?;
+        build_json_response(StatusCode::OK, &response)
+    }
+}
+
 pub struct GetTableCatalogMigrationHandler {}
 
 #[async_trait::async_trait]

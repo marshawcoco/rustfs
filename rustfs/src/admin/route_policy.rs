@@ -979,6 +979,30 @@ pub const ADMIN_ROUTE_POLICY_SPECS: &[AdminRouteSpec] = &[
     admin(HttpMethod::Put, "/iceberg/v1/buckets/{warehouse}", SET_TABLE_BUCKET, RouteRiskLevel::High),
     admin(
         HttpMethod::Get,
+        "/iceberg/v1/{warehouse}/catalog/capacity",
+        GET_TABLE_CATALOG,
+        RouteRiskLevel::Sensitive,
+    ),
+    admin(
+        HttpMethod::Post,
+        "/iceberg/v1/{warehouse}/catalog/compact",
+        MIGRATE_TABLE_CATALOG,
+        RouteRiskLevel::High,
+    ),
+    admin(
+        HttpMethod::Get,
+        "/_iceberg/v1/{warehouse}/catalog/capacity",
+        GET_TABLE_CATALOG,
+        RouteRiskLevel::Sensitive,
+    ),
+    admin(
+        HttpMethod::Post,
+        "/_iceberg/v1/{warehouse}/catalog/compact",
+        MIGRATE_TABLE_CATALOG,
+        RouteRiskLevel::High,
+    ),
+    admin(
+        HttpMethod::Get,
         "/iceberg/v1/buckets/{warehouse}",
         GET_TABLE_BUCKET,
         RouteRiskLevel::Sensitive,
@@ -1833,7 +1857,15 @@ mod tests {
         let table_specs = ADMIN_ROUTE_POLICY_SPECS
             .iter()
             .filter(|spec| spec.path().starts_with("/iceberg/v1") || spec.path().starts_with("/_iceberg/v1"));
-        assert_eq!(table_specs.count(), 98);
+        assert_eq!(table_specs.count(), 102);
+        for prefix in ["/iceberg/v1", "/_iceberg/v1"] {
+            assert_action(HttpMethod::Get, &format!("{prefix}/{{warehouse}}/catalog/capacity"), GET_TABLE_CATALOG);
+            assert_action(
+                HttpMethod::Post,
+                &format!("{prefix}/{{warehouse}}/catalog/compact"),
+                MIGRATE_TABLE_CATALOG,
+            );
+        }
         assert_action(HttpMethod::Put, "/iceberg/v1/buckets/{warehouse}", SET_TABLE_BUCKET);
         assert_action(HttpMethod::Get, "/_iceberg/v1/buckets/{warehouse}", GET_TABLE_BUCKET);
         assert_action(HttpMethod::Get, "/iceberg/v1/{warehouse}/namespaces", GET_TABLE_NAMESPACE);

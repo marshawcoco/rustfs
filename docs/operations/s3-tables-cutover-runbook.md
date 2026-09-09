@@ -1,6 +1,6 @@
 # S3 Tables Durable Backing Cutover Runbook
 
-**Use this when:** moving a table-catalog warehouse from object-backed catalog state to the durable strong snapshot backing (`RUSTFS_TABLE_CATALOG_BACKING=durable-strong`), or rolling the strong snapshot format from version 1 to version 2.
+**Use this when:** moving a table-catalog warehouse from object-backed catalog state to the durable strong snapshot backing (`RUSTFS_TABLE_CATALOG_BACKING=durable-strong`), upgrading its snapshot format, or operating its capacity and receipt archives.
 **Source of truth:** the `{warehouse}/catalog/migration` routes registered in `rustfs/src/admin/handlers/table_catalog/routes.rs`; the env constants named below; claims and status labels in [docs/architecture/s3-tables-support-matrix.md](../architecture/s3-tables-support-matrix.md).
 
 ## Preconditions
@@ -48,6 +48,31 @@ After the durable-strong state advances, cancellation fails closed; recovery req
 2. After every catalog writer can read version 2, set both `RUSTFS_TABLE_CATALOG_STRONG_SNAPSHOT_V2=true` and `RUSTFS_TABLE_CATALOG_STRONG_SNAPSHOT_V2_FLEET_CONFIRMED=true` and restart the catalog writers. Setting only one gate does not change the write format.
 3. Perform a controlled catalog write or migration materialization and confirm the persisted snapshot is version 2 before serving table data-plane traffic. Once v2 is fleet-confirmed, data-plane resolution fails closed until the persisted snapshot is v2.
 4. After any version 2 snapshot is persisted, do not roll writers back to a binary that only reads version 1. Current binaries preserve version 2 even when the gates are later disabled.
+
+## Durable Catalog Capacity And Receipt Archives
+
+The shared snapshot has a 64 MiB encoded hard limit. A warning becomes active at 48 MiB; ordinary growth above 56 MiB returns HTTP 503 with the existing catalog-unavailable error envelope before publishing a pointer. Reads and idempotent replays do not consume this budget. Size-neutral and shrinking writes remain available, and rename, repair of an existing receipt, and explicit receipt compaction may use the remaining space, but cannot exceed 64 MiB. Namespace, table, and view entries still share a single CAS object; archival is not horizontal sharding or an external KV.
+
+### Enable Receipt Archival
+
+1. Upgrade every catalog reader and writer to a binary that reads snapshot version 3 and receipt archives. Keep both version 3 gates disabled during the rolling upgrade. Version 1 and 2 snapshots retain their original encoding and inline history.
+2. After confirming the entire fleet, set both `RUSTFS_TABLE_CATALOG_STRONG_SNAPSHOT_V3=true` and `RUSTFS_TABLE_CATALOG_STRONG_SNAPSHOT_V3_FLEET_CONFIRMED=true`, then restart the writers. Either flag alone does not activate version 3. A persisted version 3 is retained even if flags are subsequently disabled; older binaries reject it instead of discarding archives.
+3. Query `GET /iceberg/v1/{warehouse}/catalog/capacity` with global `admin:GetTableCatalog` permission. The snapshot bytes and resource/receipt totals are global because all buckets share the snapshot. `pending-archive-receipts` applies only to the requested warehouse. The response contains no receipt payload, token, or internal object path.
+4. Call `POST /iceberg/v1/{warehouse}/catalog/compact` with global `admin:MigrateTableCatalog` permission. Each call archives at most 128 old committed receipts and leaves at least the latest 32 online per table. Repeat while the pending count decreases. A CAS conflict requires another call with fresh state. Both operations also support the `/_iceberg/v1` alias; object-backed mode rejects them explicitly.
+5. Once version 3 is active, each table commit archives at most one eligible old receipt for that table, limiting work added to the commit path. Use explicit compaction for pre-existing backlog. Tables with any staged receipt retain their entire online recovery history; resolve recovery before trying to reclaim it. Compaction never moves the current metadata pointer, changes generation, or deletes Iceberg files.
+
+An immutable, content-addressed receipt index preserves commit-ID and catalog idempotency-key lookup for the lifetime of the table identity. Nodes are written and read back with checksum validation before a snapshot CAS publishes their root and removes the online copies. A failed CAS leaves the previous online history authoritative. Missing/corrupt referenced nodes fail closed, including negative key lookups; they are not interpreted as permission to reuse an ID. The latest online chain remains available to recovery. Catalog receipt retention does not change Iceberg `metadata-log` or snapshot retention, and does not advertise mutation-wide standard `Idempotency-Key` support.
+
+Archive objects are append-only. Obsolete index nodes and failed-attempt objects are not automatically deleted; retaining them protects readers that already loaded an older root. Archive physical storage must be budgeted separately and included with the snapshot in backups. Do not apply a generic bucket lifecycle rule or manually delete internal archive objects. Dropping a table removes its live archive root and replay namespace, not its historical objects. There is no TTL-based forgetting of an active table's committed IDs.
+
+### Monitor And Recover Capacity
+
+- `table_catalog_strong_snapshot_bytes`, `table_catalog_strong_capacity_warning`, `table_catalog_strong_online_receipts`, and `table_catalog_strong_archived_receipts` describe the latest decoded snapshot.
+- `table_catalog_strong_capacity_rejections_total` counts rejected growth. `table_catalog_strong_snapshot_writes_total` distinguishes CAS outcomes.
+- `table_catalog_strong_write_lock_wait_seconds`, `table_catalog_strong_archive_prepare_seconds`, `table_catalog_strong_snapshot_prepare_seconds`, `table_catalog_strong_snapshot_cas_seconds`, and `table_catalog_strong_snapshot_reload_seconds` expose local contention, archive work, snapshot preparation, storage CAS, and reload cost. Explicit compaction includes archive work in snapshot preparation; ordinary commits archive before rechecking the publication fence.
+- `table_catalog_strong_snapshot_write_bytes_total` and `table_catalog_strong_archive_write_bytes_total` measure attempted write amplification, including retries and immutable-node reuse. They are not physical disk usage counters.
+- When compaction stops reducing the pending count, check staged recovery and the remaining table/namespace/view footprint. Removing obsolete identifiers or oversized properties can free online space. Never raise the hard limit or remove receipt roots to bypass admission.
+- After version 3 publication, rollback requires a version-3-capable binary and the complete referenced archive object set. Replacing only the snapshot with an older copy can lose acknowledged commits; an offline restore must fence all writers and restore an explicitly selected, consistent state.
 
 ## Rollback And Collision Repair Rules
 

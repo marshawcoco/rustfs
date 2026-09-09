@@ -22,11 +22,11 @@ use migration::table_catalog_backing_manifest;
 pub(crate) use object::ObjectTableCatalogStore;
 #[cfg(test)]
 pub(super) use strong::{
-    STRONG_TABLE_CATALOG_RELOAD_MAX_ATTEMPTS, STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE, StrongCommitSnapshotRecord,
-    StrongTableCatalogBucketSnapshot, StrongTableCatalogSnapshot, strong_snapshot_write_version,
+    STRONG_SNAPSHOT_ARCHIVE_VERSION, STRONG_TABLE_CATALOG_RELOAD_MAX_ATTEMPTS, STRONG_TABLE_CATALOG_SNAPSHOT_MAX_SIZE,
+    StrongCommitSnapshotRecord, StrongTableCatalogBucketSnapshot, StrongTableCatalogSnapshot, strong_snapshot_write_version,
     table_catalog_bucket_snapshot_fingerprint,
 };
-pub(crate) use strong::{StrongTableCatalogRuntime, StrongTableCatalogStore};
+pub(crate) use strong::{StrongTableCatalogRuntime, StrongTableCatalogStore, TableCatalogCapacityReport};
 
 pub(in crate::table_catalog) fn catalog_lock_acquisition_error(
     operation: &str,
@@ -1071,6 +1071,24 @@ where
         match self {
             Self::ObjectBacked(_) => TableCatalogBackingMode::ObjectBacked,
             Self::DurableStrong(_) => TableCatalogBackingMode::DurableStrong,
+        }
+    }
+
+    pub(crate) async fn catalog_capacity(&self, table_bucket: &str) -> TableCatalogStoreResult<TableCatalogCapacityReport> {
+        match self {
+            Self::DurableStrong(store) => store.catalog_capacity(table_bucket).await,
+            Self::ObjectBacked(_) => Err(TableCatalogStoreError::Unsupported(
+                "snapshot capacity requires durable-strong backing".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) async fn compact_catalog(&self, table_bucket: &str) -> TableCatalogStoreResult<TableCatalogCapacityReport> {
+        match self {
+            Self::DurableStrong(store) => store.compact_catalog(table_bucket).await,
+            Self::ObjectBacked(_) => Err(TableCatalogStoreError::Unsupported(
+                "receipt archival requires durable-strong backing".to_string(),
+            )),
         }
     }
 

@@ -40,6 +40,16 @@ fn register_table_catalog_prefix_routes(r: &mut S3Router<AdminOperation>, prefix
         AdminOperation(&GET_TABLE_CATALOG_MIGRATION_HANDLER),
     )?;
     r.insert(
+        Method::GET,
+        format!("{prefix}/{{warehouse}}/catalog/capacity").as_str(),
+        AdminOperation(&GET_TABLE_CATALOG_CAPACITY_HANDLER),
+    )?;
+    r.insert(
+        Method::POST,
+        format!("{prefix}/{{warehouse}}/catalog/compact").as_str(),
+        AdminOperation(&COMPACT_TABLE_CATALOG_HANDLER),
+    )?;
+    r.insert(
         Method::POST,
         format!("{prefix}/{{warehouse}}/catalog/migration").as_str(),
         AdminOperation(&MATERIALIZE_TABLE_CATALOG_MIGRATION_HANDLER),

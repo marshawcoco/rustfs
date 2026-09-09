@@ -266,7 +266,7 @@ pub(crate) fn record_table_commit_attempt(operation: &str) {
     counter!("rustfs_table_catalog_commit_attempts_total", "operation" => operation.to_string()).increment(1);
 }
 
-fn table_catalog_store_result_label<T>(result: &TableCatalogStoreResult<T>) -> &'static str {
+pub(in crate::table_catalog) fn table_catalog_store_result_label<T>(result: &TableCatalogStoreResult<T>) -> &'static str {
     match result {
         Ok(_) => "success",
         Err(TableCatalogStoreError::Conflict(_) | TableCatalogStoreError::AlreadyExists(_)) => "conflict",
