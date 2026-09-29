@@ -669,6 +669,82 @@ async fn strong_table_registration_and_drop_acquire_publication_before_migration
     drop_task.await.expect("drop task should join").expect("drop should succeed");
 }
 
+#[tokio::test]
+async fn strong_table_maintenance_acquires_publication_before_migration_read_lock() {
+    let backend = TestCatalogObjectBackend::default();
+    let store = StrongTableCatalogStore::new(backend.clone());
+    let bucket = "analytics";
+    let namespace = Namespace::parse("sales").expect("namespace should parse");
+    let table = IdentifierSegment::parse("orders").expect("table should parse");
+    let metadata_location = default_table_metadata_file_path(&namespace, &table, "00001.metadata.json");
+    store.put_table_bucket(test_bucket_entry(bucket)).await.unwrap();
+    store
+        .create_namespace(test_namespace_entry(bucket, &namespace))
+        .await
+        .unwrap();
+    store
+        .create_table(test_table_entry(bucket, &namespace, &table, metadata_location))
+        .await
+        .unwrap();
+
+    let publication_lock = default_table_bucket_publication_lock_path();
+    let migration_lock = TableCatalogObjectPaths::default().backing_migration_global_fence_lock_path();
+    let publication_guard = backend
+        .acquire_write_lock(bucket, &publication_lock)
+        .await
+        .expect("publication lock should be acquired");
+    let publication_attempts = backend.write_lock_acquisition_count(bucket, &publication_lock).await;
+    let migration_reads = backend.read_lock_acquisition_count(RUSTFS_META_BUCKET, &migration_lock).await;
+    let maintenance_store = store.clone();
+    let maintenance = tokio::spawn(async move {
+        maintenance_store
+            .put_table_maintenance_config(
+                bucket,
+                "sales",
+                "orders",
+                TableMaintenanceConfig {
+                    version: TABLE_MAINTENANCE_CONFIG_VERSION,
+                    background_enabled: true,
+                    ..Default::default()
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(TABLE_CATALOG_TEST_TIMEOUT, async {
+        while backend.write_lock_acquisition_count(bucket, &publication_lock).await == publication_attempts {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("maintenance should wait on the table-bucket publication lock");
+    assert_eq!(
+        backend.read_lock_acquisition_count(RUSTFS_META_BUCKET, &migration_lock).await,
+        migration_reads,
+        "maintenance must not retain a migration read lock while waiting for publication"
+    );
+    let migration_guard = tokio::time::timeout(
+        TABLE_CATALOG_TEST_TIMEOUT,
+        backend.acquire_write_lock(RUSTFS_META_BUCKET, &migration_lock),
+    )
+    .await
+    .expect("migration writer must not be blocked by maintenance waiting on publication")
+    .expect("migration write lock should be acquired");
+    drop(publication_guard);
+    tokio::time::timeout(TABLE_CATALOG_TEST_TIMEOUT, async {
+        while backend.read_lock_acquisition_count(RUSTFS_META_BUCKET, &migration_lock).await == migration_reads {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("maintenance should request the migration read lock after publication");
+    assert!(!maintenance.is_finished());
+    drop(migration_guard);
+    maintenance
+        .await
+        .expect("maintenance task should join")
+        .expect("maintenance config should persist");
+}
+
 async fn assert_direct_drop_uses_publication_locks<S>(store: S, backend: &TestCatalogObjectBackend)
 where
     S: TableCatalogStore + Clone + Send + Sync + 'static,
@@ -3755,6 +3831,230 @@ async fn configured_table_catalog_store_uses_durable_strong_snapshot() {
 
     let reloaded = ConfiguredTableCatalogStore::new_for_test(backend.clone(), TableCatalogBackingMode::DurableStrong);
     assert!(reloaded.get_table_bucket(bucket).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn durable_strong_table_maintenance_uses_strong_entry_and_recoverable_sidecars() {
+    let backend = TestCatalogObjectBackend::default();
+    let store = ConfiguredTableCatalogStore::new_for_test(backend.clone(), TableCatalogBackingMode::DurableStrong);
+    let bucket = "analytics";
+    let namespace = Namespace::parse("sales").unwrap();
+    let table = IdentifierSegment::parse("orders").unwrap();
+    let metadata_location = default_table_metadata_file_path(&namespace, &table, "00001.metadata.json");
+    let old_metadata_location = default_table_metadata_file_path(&namespace, &table, "00000.metadata.json");
+
+    store.put_table_bucket(test_bucket_entry(bucket)).await.unwrap();
+    store
+        .create_namespace(test_namespace_entry(bucket, &namespace))
+        .await
+        .unwrap();
+    store
+        .create_table(test_table_entry(bucket, &namespace, &table, metadata_location.clone()))
+        .await
+        .unwrap();
+    backend
+        .seed_object(bucket, &metadata_location, br#"{"metadata-log":[]}"#.to_vec())
+        .await;
+    backend.seed_object(bucket, &old_metadata_location, b"{}".to_vec()).await;
+
+    store
+        .put_table_maintenance_config(
+            bucket,
+            &namespace.public_name(),
+            table.as_str(),
+            TableMaintenanceConfig {
+                version: TABLE_MAINTENANCE_CONFIG_VERSION,
+                background_enabled: true,
+                delete_enabled: true,
+                retain_recent_metadata_files: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_table_maintenance_config(bucket, &namespace.public_name(), table.as_str())
+            .await
+            .unwrap()
+            .background_enabled
+    );
+
+    let scheduled = store
+        .run_table_maintenance_scheduler_once(bucket, &namespace.public_name(), table.as_str(), "scheduler-1".to_string())
+        .await
+        .unwrap();
+    assert_eq!(scheduled.report.job.status, TableMetadataMaintenanceJobStatus::Queued);
+    assert_eq!(scheduled.report.job.operation, TableMetadataMaintenanceOperation::Delete);
+
+    let completed = store
+        .run_table_metadata_maintenance_worker_once(bucket, &namespace.public_name(), table.as_str(), "worker-1".to_string())
+        .await
+        .unwrap();
+    assert_eq!(completed.job.status, TableMetadataMaintenanceJobStatus::Successful);
+    assert_eq!(completed.job.table_id, "table-id");
+    assert_eq!(completed.current_metadata_location, metadata_location);
+    assert_eq!(completed.job.deleted_metadata_file_count, 1);
+    assert!(!backend.object_exists(bucket, &old_metadata_location).await.unwrap());
+    assert!(
+        store
+            .get_table_metadata_maintenance_report(bucket, &namespace.public_name(), table.as_str(), &completed.job.job_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let mut running = completed.clone();
+    running.job.status = TableMetadataMaintenanceJobStatus::Running;
+    running.job.worker_id = Some("worker-heartbeat".to_string());
+    running.job.lease_id = "lease-heartbeat".to_string();
+    running.job.heartbeat_at = None;
+    running.job.finished_at = None;
+    let paths = TableCatalogObjectPaths::default();
+    let current_job_path = paths.table_maintenance_current_job_path(bucket, &namespace, &table, &running.job.table_id);
+    backend
+        .seed_object(RUSTFS_META_BUCKET, &current_job_path, serde_json::to_vec(&running).unwrap())
+        .await;
+    let heartbeat = store
+        .heartbeat_table_metadata_maintenance_job(
+            bucket,
+            &namespace.public_name(),
+            table.as_str(),
+            &running.job.job_id,
+            "lease-heartbeat",
+            "worker-heartbeat",
+        )
+        .await
+        .unwrap();
+    assert_eq!(heartbeat.job.status, TableMetadataMaintenanceJobStatus::Running);
+    assert!(heartbeat.job.heartbeat_at.is_some());
+    assert!(
+        heartbeat
+            .audit_events
+            .iter()
+            .any(|event| event.action == TableMaintenanceAuditAction::WorkerHeartbeat)
+    );
+
+    let reloaded = ConfiguredTableCatalogStore::new_for_test(backend.clone(), TableCatalogBackingMode::DurableStrong);
+    assert!(
+        reloaded
+            .get_table_maintenance_config(bucket, &namespace.public_name(), table.as_str())
+            .await
+            .unwrap()
+            .background_enabled
+    );
+    let reloaded_report = reloaded
+        .get_table_metadata_maintenance_report(bucket, &namespace.public_name(), table.as_str(), &completed.job.job_id)
+        .await
+        .unwrap()
+        .expect("maintenance report should survive strong catalog reload");
+    assert_eq!(reloaded_report.job.status, TableMetadataMaintenanceJobStatus::Running);
+    assert_eq!(
+        reloaded
+            .get_table_maintenance_scheduler_report(bucket, &namespace.public_name(), table.as_str())
+            .await
+            .unwrap()
+            .current_job
+            .expect("reloaded scheduler report should expose the current job")
+            .job_id,
+        completed.job.job_id
+    );
+}
+
+#[tokio::test]
+async fn durable_strong_quarantine_mutation_rejects_non_current_job() {
+    let backend = TestCatalogObjectBackend::default();
+    let object_store = ObjectTableCatalogStore::new(backend.clone());
+    let bucket = "analytics";
+    let namespace = Namespace::parse("sales").unwrap();
+    let table = IdentifierSegment::parse("orders").unwrap();
+    let metadata_location = default_table_metadata_file_path(&namespace, &table, "00001.metadata.json");
+
+    seed_table_for_metadata_maintenance(&object_store, bucket, &namespace, &table, metadata_location.clone()).await;
+    let store = ConfiguredTableCatalogStore::new_for_test(backend.clone(), TableCatalogBackingMode::DurableStrong);
+    store.put_table_bucket(test_bucket_entry(bucket)).await.unwrap();
+    store
+        .create_namespace(test_namespace_entry(bucket, &namespace))
+        .await
+        .unwrap();
+    store
+        .create_table(test_table_entry(bucket, &namespace, &table, metadata_location.clone()))
+        .await
+        .unwrap();
+    backend
+        .seed_object(bucket, &metadata_location, br#"{"metadata-log":[]}"#.to_vec())
+        .await;
+    store
+        .put_table_maintenance_config(
+            bucket,
+            &namespace.public_name(),
+            table.as_str(),
+            TableMaintenanceConfig {
+                version: TABLE_MAINTENANCE_CONFIG_VERSION,
+                background_enabled: true,
+                quarantine_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut old = object_store
+        .plan_table_metadata_maintenance(bucket, &namespace.public_name(), table.as_str(), 0)
+        .await
+        .unwrap();
+    old.job.status = TableMetadataMaintenanceJobStatus::Failed;
+    old.job.quarantine_enabled = true;
+    old.job.quarantined_object_count = 1;
+    object_store.put_table_metadata_maintenance_report(&old).await.unwrap();
+
+    let mut current = object_store
+        .plan_table_metadata_maintenance(bucket, &namespace.public_name(), table.as_str(), 0)
+        .await
+        .unwrap();
+    current.job.status = TableMetadataMaintenanceJobStatus::Failed;
+    current.job.quarantine_enabled = true;
+    current.job.quarantined_object_count = 1;
+    object_store.put_table_metadata_maintenance_report(&current).await.unwrap();
+
+    assert_matches!(
+        store
+            .apply_table_maintenance_quarantine_operation(
+                bucket,
+                &namespace.public_name(),
+                table.as_str(),
+                &old.job.job_id,
+                TableMaintenanceQuarantineOperationRequest {
+                    action: TableMaintenanceQuarantineAction::Release,
+                    reason: None,
+                },
+            )
+            .await,
+        Err(TableCatalogStoreError::Conflict(message)) if message.contains("not current")
+    );
+
+    let released = store
+        .apply_table_maintenance_quarantine_operation(
+            bucket,
+            &namespace.public_name(),
+            table.as_str(),
+            &current.job.job_id,
+            TableMaintenanceQuarantineOperationRequest {
+                action: TableMaintenanceQuarantineAction::Release,
+                reason: Some("strong quarantine release".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.report.job.quarantined_object_count, 0);
+    assert!(
+        released
+            .report
+            .job
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("strong quarantine release"))
+    );
 }
 
 #[tokio::test]
