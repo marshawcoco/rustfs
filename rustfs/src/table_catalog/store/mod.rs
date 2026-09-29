@@ -1612,7 +1612,7 @@ where
     ) -> TableCatalogStoreResult<TableMaintenanceConfig> {
         match self {
             Self::ObjectBacked(store) => store.get_table_maintenance_config(table_bucket, namespace, table).await,
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance config")),
+            Self::DurableStrong(store) => store.get_table_maintenance_config(table_bucket, namespace, table).await,
         }
     }
 
@@ -1629,7 +1629,11 @@ where
                     .put_table_maintenance_config(table_bucket, namespace, table, config)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance config")),
+            Self::DurableStrong(store) => {
+                store
+                    .put_table_maintenance_config(table_bucket, namespace, table, config)
+                    .await
+            }
         }
     }
 
@@ -1646,7 +1650,11 @@ where
                     .get_table_metadata_maintenance_report(table_bucket, namespace, table, job_id)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance report")),
+            Self::DurableStrong(store) => {
+                store
+                    .get_table_metadata_maintenance_report(table_bucket, namespace, table, job_id)
+                    .await
+            }
         }
     }
 
@@ -1662,7 +1670,11 @@ where
                     .get_table_maintenance_scheduler_report(table_bucket, namespace, table)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance scheduler")),
+            Self::DurableStrong(store) => {
+                store
+                    .get_table_maintenance_scheduler_report(table_bucket, namespace, table)
+                    .await
+            }
         }
     }
 
@@ -1679,7 +1691,11 @@ where
                     .run_table_maintenance_scheduler_once(table_bucket, namespace, table, scheduler_id)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance scheduler")),
+            Self::DurableStrong(store) => {
+                store
+                    .run_table_maintenance_scheduler_once(table_bucket, namespace, table, scheduler_id)
+                    .await
+            }
         }
     }
 
@@ -1697,7 +1713,11 @@ where
                     .apply_table_maintenance_quarantine_operation(table_bucket, namespace, table, job_id, request)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance quarantine")),
+            Self::DurableStrong(store) => {
+                store
+                    .apply_table_maintenance_quarantine_operation(table_bucket, namespace, table, job_id, request)
+                    .await
+            }
         }
     }
 
@@ -1714,7 +1734,11 @@ where
                     .run_table_metadata_maintenance_worker_once(table_bucket, namespace, table, worker_id)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance worker")),
+            Self::DurableStrong(store) => {
+                store
+                    .run_table_metadata_maintenance_worker_once(table_bucket, namespace, table, worker_id)
+                    .await
+            }
         }
     }
 
@@ -1733,7 +1757,11 @@ where
                     .heartbeat_table_metadata_maintenance_job(table_bucket, namespace, table, job_id, lease_id, worker_id)
                     .await
             }
-            Self::DurableStrong(_) => Err(Self::unsupported_for_durable_strong("table maintenance heartbeat")),
+            Self::DurableStrong(store) => {
+                store
+                    .heartbeat_table_metadata_maintenance_job(table_bucket, namespace, table, job_id, lease_id, worker_id)
+                    .await
+            }
         }
     }
 
