@@ -28,7 +28,7 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 | S3 table-bucket listings | Supported | `ListObjects`, `ListObjectsV2`, `ListObjectVersions`, metadata-list extensions, and multipart-upload listings omit warehouse objects unless the caller has `admin:GetTableMetadata` for that table, and always omit internal `.rustfs-table` keys. Protected cursors are encrypted with a key derived from the cluster root credentials, so rotating those credentials invalidates cursors already issued. |
 | Object-backed warehouse-index recovery | Supported with bounded request fallback | Data-plane requests repair or verify a missing warehouse-prefix index against bounded pages totaling at most 4,096 catalog objects. Larger catalogs fail closed with a retryable service error and require `POST /iceberg/v1/{warehouse}/catalog/warehouse-index/backfill` with `admin:MigrateTableCatalog` instead of allowing one S3 request to trigger an unbounded scan. |
 | Table bucket enablement | Supported | A regular bucket is enabled for catalog use and addressed as the REST catalog warehouse. |
-| Catalog-vended table credentials | Automated when enabled | Disabled by default. LoadTable vends credentials only when `X-Iceberg-Access-Delegation` contains the exact `vended-credentials` token; the dedicated credentials endpoint uses the same issuer path. |
+| Catalog-vended table credentials | Automated when enabled | Disabled by default. LoadTable vends credentials only when `X-Iceberg-Access-Delegation` contains the exact `vended-credentials` token; the dedicated credentials endpoint uses the same issuer path. Issued sessions carry the table identity and exact warehouse prefix and are rejected after parent-identity invalidation or table identity replacement. |
 | AWS S3 Tables endpoint shape | Profile generator | Generates the AWS catalog URI and warehouse ARN shape for migration docs. API parity not claimed. |
 | MinIO AIStor Tables profile | Profile generator plus alias smoke | Alias shape only; AIStor private extensions not claimed. |
 | Cloudflare R2 Data Catalog profile | Profile generator | Catalog URI and warehouse-name shape only; live interop not claimed. |
@@ -67,7 +67,7 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 | Commit recovery | Supported | Commit log, idempotency lookup, diagnostics, and recovery routes expose and repair finalization gaps without moving the pointer. |
 | Snapshot refs | Supported | List, create/replace, delete via commits; `main` is protected; refs with explicit retention need forced delete. |
 | Iceberg views | Supported | Create, list, load, replace, exists, drop with view-scoped authorization; only view format version 1. |
-| LoadTable and table credentials endpoint | Supported | Vending only on negotiated `vended-credentials`; one temporary session scoped to the warehouse prefix and current metadata location; missing credential permission falls back to metadata-only with an explicit reason; responses carry `Cache-Control: no-store, private`. |
+| LoadTable and table credentials endpoint | Supported | Vending only on negotiated `vended-credentials`; one temporary session scoped to the warehouse prefix and current metadata location; missing credential permission falls back to metadata-only with an explicit reason; responses carry `Cache-Control: no-store, private`. Table-scoped sessions cannot call the catalog control plane. |
 | Catalog diagnostics and export | Supported | Recovery state, consistency, backing manifest, WAL state, migration target, single-active-writer policy, scale validation matrix. |
 | Catalog import and rollback | Supported | Import/register and online rollback go through validation and commit paths. Online rollback accepts only forward-safe targets; restoring an older target that lowers watermarks is an offline disaster-recovery operation with all writers stopped. |
 | External catalog bridge | Supported operator path | Operator-supplied metadata pointer sync/import. Vendor SDK polling and policy mirroring not claimed. |
@@ -80,8 +80,10 @@ RustFS S3 Tables is an Iceberg REST Catalog and table-bucket implementation on t
 | Table-aware S3 policy bridge | Supported | Ordinary S3 actions on warehouse paths are checked through the table bridge; table policy cannot be bypassed by direct object access. |
 | Reserved catalog protection | Supported | Catalog-reserved prefixes are protected from ordinary object mutation. |
 | Static S3 credentials | Automated | Default PyIceberg smoke path. |
-| Catalog-vended credentials | Automated when enabled | `rustfs-vended-credentials` verifies the returned prefix, then checks Put/Head/Get/DeleteObject inside it and denies access outside it. |
-| Credential lifetime | Supported | Server-side TTL clamped to a short-lived range. |
+| Catalog-vended credentials | Automated when enabled | `rustfs-vended-credentials` verifies the returned prefix, then checks Put/Head/Get/DeleteObject inside it and denies access outside it. Focused server tests also bind the session to `table-id`, table bucket, and the exact warehouse prefix. |
+| Credential lifetime and parent revocation | Supported | Server-side TTL is clamped to a short-lived range. Each table-scoped data request revalidates the parent identity; disabled, deleted, expired, or chained parents fail closed without relying only on cached session state. |
+| Table identity replacement | Supported | A table-scoped session must match the current table bucket, stable table ID, and exact warehouse prefix. Drop/recreate or warehouse relocation therefore cannot reuse an old session for a different table. |
+| Catalog control-plane separation | Supported | Table-scoped storage sessions are rejected by REST catalog authentication; catalog mutations continue to require the configured catalog principal. |
 | No-long-term-data-credential bootstrap | Not claimed | Catalog setup still uses the configured principal before table-scoped credentials are requested. |
 
 ## Maintenance Matrix

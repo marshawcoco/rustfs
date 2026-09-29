@@ -859,18 +859,24 @@ impl TableCredentialIssuer for IamTableCredentialIssuer {
             "exp".to_string(),
             serde_json::Value::Number(serde_json::Number::from(expiration.unix_timestamp())),
         );
-        claims.insert("parent".to_string(), serde_json::Value::String(principal.access_key.clone()));
+        claims.insert(
+            crate::table_catalog::TABLE_CREDENTIAL_PARENT_CLAIM.to_string(),
+            serde_json::Value::String(principal.access_key.clone()),
+        );
         claims.insert(
             SESSION_POLICY_NAME.to_string(),
             serde_json::Value::String(base64_simd::URL_SAFE_NO_PAD.encode_to_string(&policy_buf)),
         );
         claims.insert(
-            "rustfs:table-bucket".to_string(),
+            crate::table_catalog::TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM.to_string(),
             serde_json::Value::String(request.entry.table_bucket.clone()),
         );
-        claims.insert("rustfs:table-id".to_string(), serde_json::Value::String(request.entry.table_id.clone()));
         claims.insert(
-            "rustfs:credential-scope-prefix".to_string(),
+            crate::table_catalog::TABLE_CREDENTIAL_TABLE_ID_CLAIM.to_string(),
+            serde_json::Value::String(request.entry.table_id.clone()),
+        );
+        claims.insert(
+            crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM.to_string(),
             serde_json::Value::String(request.scope_prefix.clone()),
         );
 
@@ -1237,6 +1243,7 @@ async fn table_catalog_request_principal(req: &S3Request<Body>) -> S3Result<Tabl
         Some(context.as_ref()),
     )
     .await?;
+    reject_table_credential_catalog_access(&credentials)?;
     let iam = context.iam();
     if !iam.is_ready() {
         return Err(table_catalog_internal_error("iam not init"));
@@ -1246,6 +1253,16 @@ async fn table_catalog_request_principal(req: &S3Request<Body>) -> S3Result<Tabl
         owner,
         iam_store: iam.handle(),
     })
+}
+
+fn reject_table_credential_catalog_access(credentials: &rustfs_credentials::Credentials) -> S3Result<()> {
+    if crate::table_catalog::table_credential_claims_present(credentials.claims_or_empty()) {
+        return Err(s3_error!(
+            AccessDenied,
+            "table-scoped storage credentials cannot access the catalog control plane"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone)]

@@ -171,6 +171,7 @@ pub(crate) struct TableDataPlaneListAccess {
     principal_fingerprint: String,
     snapshot_fingerprint: String,
     cursor_key: [u8; 32],
+    restricted_to_table: bool,
     resources: Vec<TableDataPlaneListResource>,
 }
 
@@ -218,7 +219,7 @@ impl TableDataPlaneListAccess {
         self.resources
             .iter()
             .find(|entry| object.starts_with(&entry.resource.warehouse_object_prefix))
-            .is_none_or(|entry| entry.allowed)
+            .map_or(!self.restricted_to_table, |entry| entry.allowed)
     }
 
     pub(crate) fn encode_cursor(
@@ -1765,8 +1766,142 @@ fn table_list_catalog_error(err: crate::table_catalog::TableCatalogStoreError) -
     }
 }
 
+fn table_credential_access_denied() -> S3Error {
+    s3_error!(AccessDenied, "Access Denied")
+}
+
+fn table_credential_scope_parts(scope: &str) -> Option<(&str, &str)> {
+    let scope = scope.strip_prefix("s3://")?;
+    let (bucket, object_prefix) = scope.split_once('/')?;
+    let canonical_prefix = object_prefix.strip_suffix('/')?;
+    if bucket.is_empty()
+        || canonical_prefix.is_empty()
+        || canonical_prefix.ends_with('/')
+        || canonical_prefix.contains('\\')
+        || canonical_prefix
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    Some((bucket, object_prefix))
+}
+
+fn validate_table_credential_claims(credential: &rustfs_credentials::Credentials) -> S3Result<bool> {
+    let claims = credential.claims_or_empty();
+    if !crate::table_catalog::table_credential_claims_present(claims) {
+        return Ok(false);
+    }
+
+    let required = [
+        crate::table_catalog::TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM,
+        crate::table_catalog::TABLE_CREDENTIAL_TABLE_ID_CLAIM,
+        crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM,
+        crate::table_catalog::TABLE_CREDENTIAL_PARENT_CLAIM,
+    ];
+    if required.iter().any(|claim| {
+        claims
+            .get(*claim)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    }) {
+        return Err(table_credential_access_denied());
+    }
+    if !credential.is_valid() || !credential.is_temp() || credential.parent_user.is_empty() {
+        return Err(table_credential_access_denied());
+    }
+
+    let Some(scope) = claims
+        .get(crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM)
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Err(table_credential_access_denied());
+    };
+    let Some((bucket, _)) = table_credential_scope_parts(scope) else {
+        return Err(table_credential_access_denied());
+    };
+    if claims
+        .get(crate::table_catalog::TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM)
+        .and_then(serde_json::Value::as_str)
+        != Some(bucket)
+    {
+        return Err(table_credential_access_denied());
+    }
+
+    Ok(true)
+}
+
+fn table_credential_matches_resource(
+    credential: &rustfs_credentials::Credentials,
+    resource: &crate::table_catalog::TableDataPlaneResource,
+) -> bool {
+    let claims = credential.claims_or_empty();
+    if !crate::table_catalog::table_credential_claims_present(claims) {
+        return true;
+    }
+
+    let scope_matches = claims
+        .get(crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM)
+        .and_then(serde_json::Value::as_str)
+        .and_then(table_credential_scope_parts)
+        .is_some_and(|(bucket, object_prefix)| {
+            bucket == resource.table_bucket.as_str() && object_prefix == resource.warehouse_object_prefix.as_str()
+        });
+    claims
+        .get(crate::table_catalog::TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM)
+        .and_then(serde_json::Value::as_str)
+        == Some(resource.table_bucket.as_str())
+        && claims
+            .get(crate::table_catalog::TABLE_CREDENTIAL_TABLE_ID_CLAIM)
+            .and_then(serde_json::Value::as_str)
+            == Some(resource.table_id.as_str())
+        && scope_matches
+}
+
+async fn authorize_table_credential_parent<T>(req: &S3Request<T>, credential: &rustfs_credentials::Credentials) -> S3Result<()> {
+    if !validate_table_credential_claims(credential)? {
+        return Ok(());
+    }
+
+    let claims = credential.claims_or_empty();
+    let parent = claims
+        .get(crate::table_catalog::TABLE_CREDENTIAL_PARENT_CLAIM)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(table_credential_access_denied)?;
+    if parent != credential.parent_user {
+        return Err(table_credential_access_denied());
+    }
+
+    let iam_store = request_iam_store(req)?;
+    let (identity, valid) = iam_store
+        .check_key(parent)
+        .await
+        .map_err(|_| table_credential_access_denied())?;
+    let Some(identity) = identity else {
+        return Err(table_credential_access_denied());
+    };
+    if !valid || identity.credentials.is_temp() || identity.credentials.is_service_account() {
+        return Err(table_credential_access_denied());
+    }
+    Ok(())
+}
+
 async fn prepare_table_data_plane_list_access<T>(req: &mut S3Request<T>, bucket: &str, action: S3Action) -> S3Result<()> {
+    let (cred, is_owner) = {
+        let req_info = req_info_ref(req)?;
+        (req_info.cred.clone(), req_info.is_owner)
+    };
+    let table_credential = match cred.as_ref() {
+        Some(credential) => validate_table_credential_claims(credential)?,
+        None => false,
+    };
+    if let Some(credential) = cred.as_ref() {
+        authorize_table_credential_parent(req, credential).await?;
+    }
     if !table_bucket_enabled_for_data_plane(req, bucket).await? {
+        if table_credential {
+            return Err(table_credential_access_denied());
+        }
         return Ok(());
     }
     retain_table_bucket_publication_guard(req, bucket).await?;
@@ -1774,10 +1909,6 @@ async fn prepare_table_data_plane_list_access<T>(req: &mut S3Request<T>, bucket:
         return Err(S3Error::from(ApiError::access_denied()));
     }
 
-    let (cred, is_owner) = {
-        let req_info = req_info_ref(req)?;
-        (req_info.cred.clone(), req_info.is_owner)
-    };
     let remote_addr = req
         .extensions
         .get::<Option<RemoteAddr>>()
@@ -1809,8 +1940,12 @@ async fn prepare_table_data_plane_list_access<T>(req: &mut S3Request<T>, bucket:
         let warehouse_object_prefix =
             crate::table_catalog::table_warehouse_object_prefix(&table).map_err(table_list_catalog_error)?;
         let resource = crate::table_catalog::table_data_plane_resource_from_entry(table.clone(), warehouse_object_prefix);
-        let allowed = match (cred.as_ref(), iam_store.as_ref()) {
-            (Some(credential), Some(iam_store)) => {
+        let identity_matches = cred
+            .as_ref()
+            .is_none_or(|credential| table_credential_matches_resource(credential, &resource));
+        let allowed = match (identity_matches, cred.as_ref(), iam_store.as_ref()) {
+            (false, _, _) => false,
+            (true, Some(credential), Some(iam_store)) => {
                 let resource_object = resource.catalog_resource_object();
                 iam_store
                     .is_allowed(&Args {
@@ -1830,6 +1965,14 @@ async fn prepare_table_data_plane_list_access<T>(req: &mut S3Request<T>, bucket:
         };
         resources.push(TableDataPlaneListResource { resource, allowed });
     }
+    if table_credential
+        && !resources.iter().any(|entry| {
+            cred.as_ref()
+                .is_some_and(|credential| table_credential_matches_resource(credential, &entry.resource))
+        })
+    {
+        return Err(table_credential_access_denied());
+    }
     resources.sort_by(|left, right| {
         left.resource
             .warehouse_object_prefix
@@ -1848,6 +1991,7 @@ async fn prepare_table_data_plane_list_access<T>(req: &mut S3Request<T>, bucket:
         principal_fingerprint: table_list_principal_fingerprint(cred.as_ref(), is_owner),
         snapshot_fingerprint: table_list_snapshot_fingerprint(&resources),
         cursor_key: table_list_cursor_key(req)?,
+        restricted_to_table: table_credential,
         resources,
     };
     req.extensions.insert(access);
@@ -1946,13 +2090,23 @@ async fn authorize_table_data_plane_if_needed<T>(
     let Some(admin_action) = table_data_plane_admin_action(action) else {
         return Ok(());
     };
+    let table_credential = validate_table_credential_claims(cred)?;
+    if table_credential {
+        authorize_table_credential_parent(req, cred).await?;
+    }
     if table_data_plane_publication_fence_required(req, action) {
         retain_table_bucket_publication_guard(req, bucket).await?;
     }
     let table_bucket_enabled = table_bucket_enabled_for_data_plane(req, bucket).await?;
     let Some(resource) = table_data_plane_resource_for_authorization(req, bucket, object, table_bucket_enabled).await? else {
+        if table_credential {
+            return Err(table_credential_access_denied());
+        }
         return Ok(());
     };
+    if table_credential && !table_credential_matches_resource(cred, &resource) {
+        return Err(table_credential_access_denied());
+    }
     let iam_store = request_iam_store(req)?;
     let default_claims = HashMap::new();
     let claims = cred.claims.as_ref().unwrap_or(&default_claims);
@@ -3374,9 +3528,10 @@ mod tests {
         legal_hold_write_requested, list_parts_authorize_action, load_bucket_policy_existing_object_tag_hint,
         maybe_merge_object_tag_conditions, merge_list_bucket_query_conditions, merge_request_object_tag_conditions,
         owner_can_bypass_policy_deny, post_object_authorize_action, put_bucket_policy_authorize_action, request_context_from_req,
-        request_object_store, require_owned_reserved_table_object, retention_write_requested, table_data_plane_admin_action,
-        table_data_plane_content_mutation, table_data_plane_resource_for_request, table_publication_guard_error,
-        validate_post_object_success_controls, versioned_read_action,
+        request_object_store, require_owned_reserved_table_object, retention_write_requested, table_credential_matches_resource,
+        table_data_plane_admin_action, table_data_plane_content_mutation, table_data_plane_resource_for_request,
+        table_publication_guard_error, validate_post_object_success_controls, validate_table_credential_claims,
+        versioned_read_action,
     };
     use crate::error::ApiError;
     use crate::storage::storage_api::contract::bucket::{BucketOperations as _, DeleteBucketOptions, MakeBucketOptions};
@@ -3521,6 +3676,7 @@ mod tests {
             principal_fingerprint: "principal".to_string(),
             snapshot_fingerprint: "snapshot".to_string(),
             cursor_key: [0x42; 32],
+            restricted_to_table: false,
             resources: vec![TableDataPlaneListResource {
                 resource: crate::table_catalog::TableDataPlaneResource {
                     table_bucket: "analytics".to_string(),
@@ -3532,6 +3688,138 @@ mod tests {
                 allowed,
             }],
         }
+    }
+
+    fn table_data_plane_resource_for_credentials() -> crate::table_catalog::TableDataPlaneResource {
+        crate::table_catalog::TableDataPlaneResource {
+            table_bucket: "warehouse".to_string(),
+            namespace: "analytics".to_string(),
+            table: "events".to_string(),
+            table_id: "table-id".to_string(),
+            warehouse_object_prefix: "tables/table-id/".to_string(),
+        }
+    }
+
+    fn table_credential_for_resource(resource: &crate::table_catalog::TableDataPlaneResource) -> rustfs_credentials::Credentials {
+        let mut claims = HashMap::new();
+        claims.insert(
+            crate::table_catalog::TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM.to_string(),
+            serde_json::Value::String(resource.table_bucket.clone()),
+        );
+        claims.insert(
+            crate::table_catalog::TABLE_CREDENTIAL_TABLE_ID_CLAIM.to_string(),
+            serde_json::Value::String(resource.table_id.clone()),
+        );
+        claims.insert(
+            crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM.to_string(),
+            serde_json::Value::String(format!("s3://{}/{}", resource.table_bucket, resource.warehouse_object_prefix)),
+        );
+        claims.insert(
+            crate::table_catalog::TABLE_CREDENTIAL_PARENT_CLAIM.to_string(),
+            serde_json::Value::String("parent-access-key".to_string()),
+        );
+        rustfs_credentials::Credentials {
+            access_key: "table-session-access".to_string(),
+            secret_key: "table-session-secret".to_string(),
+            session_token: "table-session-token".to_string(),
+            expiration: Some(OffsetDateTime::now_utc() + time::Duration::minutes(5)),
+            parent_user: "parent-access-key".to_string(),
+            claims: Some(claims),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn table_credential_identity_is_required_to_match_the_current_resource() {
+        let resource = table_data_plane_resource_for_credentials();
+        let credential = table_credential_for_resource(&resource);
+
+        assert!(crate::table_catalog::table_credential_claims_present(credential.claims_or_empty()));
+        assert!(matches!(validate_table_credential_claims(&credential), Ok(true)));
+        assert!(table_credential_matches_resource(&credential, &resource));
+
+        let mut wrong_table = resource.clone();
+        wrong_table.table_id = "new-table-id".to_string();
+        wrong_table.warehouse_object_prefix = "tables/new-table-id/".to_string();
+        assert!(!table_credential_matches_resource(&credential, &wrong_table));
+
+        let mut wrong_bucket = resource.clone();
+        wrong_bucket.table_bucket = "other-warehouse".to_string();
+        assert!(!table_credential_matches_resource(&credential, &wrong_bucket));
+
+        let mut adjacent_prefix = resource.clone();
+        adjacent_prefix.warehouse_object_prefix = "tables/table-id-neighbor/".to_string();
+        assert!(!table_credential_matches_resource(&credential, &adjacent_prefix));
+    }
+
+    #[test]
+    fn malformed_table_credential_claims_fail_closed_without_affecting_ordinary_credentials() {
+        let resource = table_data_plane_resource_for_credentials();
+        let mut credential = table_credential_for_resource(&resource);
+        credential
+            .claims
+            .as_mut()
+            .expect("table credential claims should exist")
+            .remove(crate::table_catalog::TABLE_CREDENTIAL_TABLE_ID_CLAIM);
+        assert!(validate_table_credential_claims(&credential).is_err());
+
+        let mut disabled = table_credential_for_resource(&resource);
+        disabled.status = "off".to_string();
+        assert!(validate_table_credential_claims(&disabled).is_err());
+
+        let mut expired = table_credential_for_resource(&resource);
+        expired.expiration = Some(OffsetDateTime::now_utc() - time::Duration::minutes(1));
+        assert!(validate_table_credential_claims(&expired).is_err());
+
+        let ordinary = rustfs_credentials::Credentials::default();
+        assert!(matches!(validate_table_credential_claims(&ordinary), Ok(false)));
+        assert!(table_credential_matches_resource(&ordinary, &resource));
+    }
+
+    #[test]
+    fn table_credential_scope_must_be_canonical_and_bound_to_the_claimed_bucket() {
+        let resource = table_data_plane_resource_for_credentials();
+        let mut credential = table_credential_for_resource(&resource);
+
+        credential
+            .claims
+            .as_mut()
+            .expect("table credential claims should exist")
+            .insert(
+                crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM.to_string(),
+                serde_json::Value::String("s3://warehouse/tables/table-id".to_string()),
+            );
+        assert!(validate_table_credential_claims(&credential).is_err());
+
+        credential
+            .claims
+            .as_mut()
+            .expect("table credential claims should exist")
+            .insert(
+                crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM.to_string(),
+                serde_json::Value::String("s3://other-warehouse/tables/table-id/".to_string()),
+            );
+        assert!(validate_table_credential_claims(&credential).is_err());
+
+        credential
+            .claims
+            .as_mut()
+            .expect("table credential claims should exist")
+            .insert(
+                crate::table_catalog::TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM.to_string(),
+                serde_json::Value::String("s3://warehouse/tables/../table-id/".to_string()),
+            );
+        assert!(validate_table_credential_claims(&credential).is_err());
+    }
+
+    #[test]
+    fn restricted_table_list_does_not_expose_objects_outside_the_bound_table() {
+        let mut access = table_list_access(true);
+        access.restricted_to_table = true;
+
+        assert!(access.allows_object("tables/table-id/data/file.parquet"));
+        assert!(!access.allows_object("tables/other-table/data/file.parquet"));
+        assert!(!access.allows_object("ordinary/file.txt"));
     }
 
     #[test]

@@ -10632,6 +10632,23 @@ fn table_entry_for_credentials() -> crate::table_catalog::TableEntry {
     }
 }
 
+#[test]
+fn table_scoped_credentials_cannot_authenticate_the_catalog_control_plane() {
+    let mut claims = std::collections::HashMap::new();
+    claims.insert(
+        crate::table_catalog::TABLE_CREDENTIAL_TABLE_ID_CLAIM.to_string(),
+        serde_json::Value::String("table-id".to_string()),
+    );
+    let table_credential = rustfs_credentials::Credentials {
+        claims: Some(claims),
+        ..Default::default()
+    };
+    assert!(reject_table_credential_catalog_access(&table_credential).is_err());
+
+    let ordinary_credential = rustfs_credentials::Credentials::default();
+    assert!(reject_table_credential_catalog_access(&ordinary_credential).is_ok());
+}
+
 #[tokio::test]
 async fn disabled_table_credential_issuer_keeps_credentials_empty() {
     let issuer = DisabledTableCredentialIssuer;

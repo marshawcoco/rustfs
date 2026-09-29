@@ -462,7 +462,7 @@ expected status, observed status, and metadata location.
 Unsupported behavior is documented instead of hidden behind internal errors. The
 current unsupported inventory is:
 
-- credential vending: automated after table bootstrap with exact-prefix validation and a data-plane scope probe; full no-long-term-data-credential bootstrap is not claimed
+- credential vending: automated after table bootstrap with exact-prefix validation and a data-plane scope probe; issued sessions are bound to the table bucket, stable table ID, and exact warehouse prefix, and the data plane revalidates the parent identity on each table request; full no-long-term-data-credential bootstrap is not claimed
 - background maintenance worker: controlled scheduler run, worker run-once, heartbeat, quarantine operation, and scheduler status endpoints are registered; disabled/paused/queued/backpressure/retry/quarantine/audit-timeline state and per-job audit events are machine-readable; continuous in-process scheduling is not claimed
 - manifest/data reachability cleanup: metadata maintenance reads manifest-list and manifest Avro references, reports manifest/data/delete reachability, and deletes only unreferenced table objects that pass the safety window
 - snapshot expiration dry-run planning and manual catalog commit: supported through metadata maintenance reports
@@ -510,6 +510,15 @@ RUSTFS_TABLE_CATALOG_CREDENTIAL_TTL_SECONDS=900
 ```
 
 The TTL is clamped to the supported short-lived range by the server.
+
+Table-scoped sessions are data-plane credentials, not catalog principals. The
+server rejects them at the REST catalog control plane, checks their table
+bucket, table ID, and exact warehouse prefix before object access, and rejects
+them when the parent identity is disabled, deleted, expired, or itself a
+temporary/service identity. This prevents a dropped or relocated table from
+reusing an old session. The smoke profile covers the exact-prefix boundary;
+parent-status and drop/recreate lifecycle probes remain focused Rust coverage
+and are not claimed as live client automation.
 
 ## DuckDB REST Catalog Profile
 

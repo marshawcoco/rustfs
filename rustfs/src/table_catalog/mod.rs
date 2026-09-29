@@ -19,7 +19,7 @@
 //! catalog routes and object guards can share.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     num::NonZeroUsize,
     ops::Bound,
     sync::Arc,
@@ -112,6 +112,21 @@ pub(crate) const ENV_TABLE_CATALOG_PUBLICATION_FENCE_FLEET_CONFIRMED: &str =
 pub(crate) const ENV_TABLE_CATALOG_STRONG_SNAPSHOT_V2: &str = "RUSTFS_TABLE_CATALOG_STRONG_SNAPSHOT_V2";
 pub(crate) const ENV_TABLE_CATALOG_STRONG_SNAPSHOT_V2_FLEET_CONFIRMED: &str =
     "RUSTFS_TABLE_CATALOG_STRONG_SNAPSHOT_V2_FLEET_CONFIRMED";
+pub(crate) const TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM: &str = "rustfs:table-bucket";
+pub(crate) const TABLE_CREDENTIAL_TABLE_ID_CLAIM: &str = "rustfs:table-id";
+pub(crate) const TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM: &str = "rustfs:credential-scope-prefix";
+pub(crate) const TABLE_CREDENTIAL_PARENT_CLAIM: &str = "parent";
+
+pub(crate) fn table_credential_claims_present(claims: &HashMap<String, serde_json::Value>) -> bool {
+    [
+        TABLE_CREDENTIAL_TABLE_BUCKET_CLAIM,
+        TABLE_CREDENTIAL_TABLE_ID_CLAIM,
+        TABLE_CREDENTIAL_SCOPE_PREFIX_CLAIM,
+    ]
+    .into_iter()
+    .any(|claim| claims.contains_key(claim))
+}
+
 pub(crate) const TABLE_CATALOG_BACKING_OBJECT: &str = "object";
 pub(crate) const TABLE_CATALOG_BACKING_DURABLE_STRONG: &str = "durable-strong";
 pub(crate) const TABLE_METADATA_DIGEST_REQUIREMENT_TYPE: &str = "assert-rustfs-metadata-sha256";
