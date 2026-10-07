@@ -3993,6 +3993,7 @@ async fn durable_strong_quarantine_mutation_rejects_non_current_job() {
                 version: TABLE_MAINTENANCE_CONFIG_VERSION,
                 background_enabled: true,
                 quarantine_enabled: true,
+                quarantine_retention_seconds: 86_400,
                 ..Default::default()
             },
         )
