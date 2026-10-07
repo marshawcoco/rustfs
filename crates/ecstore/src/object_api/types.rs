@@ -1498,6 +1498,17 @@ impl Clone for ObjectInfo {
 }
 
 impl ObjectInfo {
+    /// Return the persisted EC block size exposed by the response-side
+    /// projection.  Callers must not infer this value from request metadata.
+    pub fn effective_ec_block_size(&self) -> Option<usize> {
+        rustfs_utils::http::metadata_compat::get_consistent_str(
+            &self.user_defined,
+            crate::object_api::EC_BLOCK_SIZE_INFO_INTERNAL_SUFFIX,
+        )
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    }
+
     pub(crate) fn shard_integrity_write_mode(&self) -> ShardIntegrityWriteMode {
         // Any declaration requires protection. Malformed declarations remain
         // errors in the source reader and must never select the legacy path.
@@ -1882,6 +1893,17 @@ impl ObjectInfo {
         let metadata = {
             let mut v = fi.metadata.clone();
             clean_metadata(&mut v);
+            // The frame quantum is a storage-layout detail. Keep it in
+            // FileInfo for the reader, but never expose the internal marker as
+            // ordinary S3 metadata.
+            rustfs_utils::http::metadata_compat::remove_str(&mut v, crate::object_api::EC_READ_QUANTUM_INFO_INTERNAL_SUFFIX);
+            if !fi.deleted && !fi.is_remote() && fi.erasure.block_size > 0 {
+                rustfs_utils::http::metadata_compat::insert_str(
+                    &mut v,
+                    crate::object_api::EC_BLOCK_SIZE_INFO_INTERNAL_SUFFIX,
+                    fi.erasure.block_size.to_string(),
+                );
+            }
             v
         };
 
@@ -2858,6 +2880,31 @@ mod tests {
         let info = ObjectInfo::from_file_info_with_version_id(&fi, "bucket", "object", None);
 
         assert_eq!(info.version_id, None, "a normalized absent version must not be rewritten to nil");
+    }
+
+    #[test]
+    fn from_file_info_projects_persisted_ec_block_size_for_responses() {
+        let mut fi = FileInfo::new("bucket/object", 4, 2);
+        fi.size = 1;
+        fi.erasure.block_size = 64 * 1024;
+
+        let info = ObjectInfo::from_file_info(&fi, "bucket", "object", false);
+
+        assert_eq!(info.effective_ec_block_size(), Some(64 * 1024));
+        assert_eq!(
+            info.user_defined
+                .get(crate::object_api::EC_BLOCK_SIZE_INFO_INTERNAL_KEY)
+                .map(String::as_str),
+            Some("65536")
+        );
+
+        fi.erasure.block_size = 131_072;
+        let info = ObjectInfo::from_file_info(&fi, "bucket", "object", false);
+        assert_eq!(info.effective_ec_block_size(), Some(131_072));
+
+        fi.transition_status = rustfs_filemeta::TRANSITION_COMPLETE.to_string();
+        let info = ObjectInfo::from_file_info(&fi, "bucket", "remote-object", false);
+        assert_eq!(info.effective_ec_block_size(), None);
     }
 
     #[test]
