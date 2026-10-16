@@ -188,10 +188,10 @@ test-group = 'embedded-test-ports'
 filter = 'package(rustfs) & (binary(/^connect_registration$/) | binary(connect_inventory) | binary(connect_perf_drive) | (binary(connect_perf_client) & test(=configured_proxy_and_direct_endpoint_failures_are_distinct)) | (binary(connect_perf_object) & test(/^(real_rustfs_endpoint_and_production_cli_support_bounded_get_and_put|cleanup_uses_a_budget_independent_of_the_measurement_window|oversized_response_is_rejected_without_buffering_it)$/)))'
 threads-required = "num-test-threads"
 
-# This cancellation probe hashes the serving executable before acquiring its
-# collector lease. Keep competing test processes out of its 30s startup budget.
+# These probes hash the serving executable before capture. Reserve capacity
+# for the cold hash without changing protocol deadlines or cancellation checks.
 [[profile.default.overrides]]
-filter = 'package(rustfs) & test(=connect::diagnostics::trace_runtime::tests::local_runtime_profile_cancellation_waits_for_lease_release)'
+filter = 'package(rustfs) & test(/^connect::diagnostics::trace_runtime::tests::(local_runtime_profile_cancellation_waits_for_lease_release|local_native_threads_profiles_service_process_and_signs_offline|local_memory_profile_signs_service_capture_with_offline_identity|local_cpu_profile_uses_service_capture_and_offline_identity)$/)'
 threads-required = "num-test-threads"
 
 # These real IAM/state fixtures keep production lock-acquisition limits while
@@ -452,9 +452,9 @@ test-group = 'embedded-test-ports'
 filter = 'package(rustfs) & (binary(/^connect_registration$/) | binary(connect_inventory) | binary(connect_perf_drive) | (binary(connect_perf_client) & test(=configured_proxy_and_direct_endpoint_failures_are_distinct)) | (binary(connect_perf_object) & test(/^(real_rustfs_endpoint_and_production_cli_support_bounded_get_and_put|cleanup_uses_a_budget_independent_of_the_measurement_window|oversized_response_is_rejected_without_buffering_it)$/)))'
 threads-required = "num-test-threads"
 
-# Preserve the cancellation probe's startup budget and assertions in CI too.
+# Keep the same cold-hash capacity reservation in CI.
 [[profile.ci.overrides]]
-filter = 'package(rustfs) & test(=connect::diagnostics::trace_runtime::tests::local_runtime_profile_cancellation_waits_for_lease_release)'
+filter = 'package(rustfs) & test(/^connect::diagnostics::trace_runtime::tests::(local_runtime_profile_cancellation_waits_for_lease_release|local_native_threads_profiles_service_process_and_signs_offline|local_memory_profile_signs_service_capture_with_offline_identity|local_cpu_profile_uses_service_capture_and_offline_identity)$/)'
 threads-required = "num-test-threads"
 
 # Keep the same IAM/state fixture capacity reservation in CI without changing the
