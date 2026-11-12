@@ -1,10 +1,10 @@
 # RustFS Performance Test Results
 
-- Date: 2026-11-12 10:14:33 UTC
+- Date: 2026-11-12 10:44:40 UTC
 - Target: rustfs-node1:9000,rustfs-node2:9000,rustfs-node3:9000,rustfs-node4:9000
 - Concurrency: 64; duration: 5m; sleep: 60s; GET objects: 2500
 - Methods: get put mixed; sizes: 1KiB 4KiB 16KiB 128KiB 1MiB 4MiB 8MiB 16MiB 32MiB 64MiB
-- Rounds: selected=30; parsed=14; failed=0
+- Rounds: selected=30; parsed=15; failed=0
 
 ## GET Results
 
@@ -29,6 +29,7 @@
 | 4KiB | 3.62 MiB/s | 925.99 | 69.1ms | 68.7ms | 79.0ms | 89.1ms | 69ms | 89ms | 136ms |
 | 16KiB | 14.33 MiB/s | 917.36 | 69.7ms | 69.3ms | 79.3ms | 92.2ms | 70ms | 92ms | 308ms |
 | 128KiB | 100.22 MiB/s | 801.80 | 79.7ms | 79.0ms | 91.7ms | 106.3ms | 80ms | 106ms | 397ms |
+| 1MiB | 565.49 MiB/s | 565.49 | 113.2ms | 112.6ms | 128.6ms | 144.9ms | 112ms | 144ms | 238ms |
 
 ## MIXED Results (Total)
 
