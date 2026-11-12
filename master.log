@@ -85,3 +85,6 @@
 2026-11-12T13:05:00Z SLEEP 60s before next round
 2026-11-12T13:06:00Z START round=29/30 method=mixed size=32MiB concurrency=64 duration=5m
 2026-11-12T13:12:37Z END round=29/30 method=mixed size=32MiB rc=0 elapsed=397s parsed=ok
+2026-11-12T13:12:44Z SLEEP 60s before next round
+2026-11-12T13:13:44Z START round=30/30 method=mixed size=64MiB concurrency=64 duration=5m
+2026-11-12T13:20:46Z END round=30/30 method=mixed size=64MiB rc=0 elapsed=422s parsed=ok
