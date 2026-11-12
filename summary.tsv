@@ -25,3 +25,4 @@ mixed	16KiB	16.19 MiB/s	1727.20	17.6ms	75.6ms
 mixed	128KiB	121.49 MiB/s	1619.88	18.6ms	82.1ms
 mixed	1MiB	605.98 MiB/s	1009.97	41.1ms	134.0ms
 mixed	4MiB	1915.34 MiB/s	798.06	58.8ms	174.3ms
+mixed	8MiB	2745.75 MiB/s	572.03	88.6ms	241.5ms
