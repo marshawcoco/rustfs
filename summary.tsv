@@ -9,3 +9,4 @@ get	8MiB	5356.45 MiB/s	669.56	95.5ms	95.8ms	109.0ms	122.3ms	51ms	79ms	372ms
 get	16MiB	6295.86 MiB/s	393.49	162.4ms	163.5ms	177.1ms	202.0ms	60ms	96ms	431ms
 get	32MiB	5772.89 MiB/s	180.40	352.9ms	356.3ms	386.4ms	422.5ms	96ms	167ms	409ms
 get	64MiB	6441.50 MiB/s	100.65	633.2ms	634.8ms	709.1ms	780.1ms	90ms	170ms	374ms
+put	1KiB	0.92 MiB/s	938.07	68.2ms	67.8ms	77.9ms	88.5ms	68ms	88ms	124ms
