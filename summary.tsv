@@ -15,3 +15,4 @@ put	4KiB	3.60 MiB/s	922.12	69.4ms	68.8ms	79.6ms	89.7ms	69ms	90ms	124ms
 put	16KiB	13.93 MiB/s	891.39	71.8ms	71.1ms	83.1ms	93.7ms	72ms	94ms	146ms
 put	128KiB	98.52 MiB/s	788.19	81.2ms	80.7ms	93.9ms	106.1ms	81ms	106ms	179ms
 put	1MiB	562.20 MiB/s	562.20	112.8ms	111.9ms	128.7ms	144.9ms	112ms	144ms	186ms
+put	4MiB	1527.61 MiB/s	381.90	166.9ms	166.1ms	191.8ms	217.9ms	163ms	214ms	273ms
