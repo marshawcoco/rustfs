@@ -1,6 +1,6 @@
 # Dynamic RustFS vs RustFS 1.0.5-preview.1 vs MinIO AIStor (Aliyun i5.16xlarge NVMe Benchmark)
 
-- **状态 (Status)**: `Running (9/30 done: get 8MiB finished)` — 已完成 **9 / 30** 轮 (`Updated: 2026-11-12 04:04:25 UTC`)
+- **状态 (Status)**: `Running (10/30 done: get 16MiB finished)` — 已完成 **10 / 30** 轮 (`Updated: 2026-11-12 04:11:09 UTC`)
 - **Dynamic 分支**: `feat/dynamic-block-size-layouts-v2` (`963556e14`, PR `rustfs/rustfs#9255`, synced with `1.0.5-preview.1`)
 - **硬件环境 (Plan B 全维度 >100% 对齐规格)**:
   - **存储节点 (×4)**: 阿里云 `ecs.i5.16xlarge` 塑形为 **6 颗独占物理核 (`Intel Xeon 6 6982P-C @ 3.9GHz, ThreadsPerCore=1`)** + **Cgroup v2 `MemoryMax=12G`** + **真 4 块独立物理 PCIe 5.0 本地 NVMe SSD Pro (`nvme1n1..4`)** + **`163.84 Gbps` 对称网络**
@@ -18,7 +18,7 @@
 | **1MiB** (`1MiB`) | **2854.41 MiB/s** (2854.4) | 2063.43 MiB/s (2063.4) | 3031.42 MiB/s | **+38.3% ✅** | -5.8% | 31.4 ms | 58.4 ms | -46.2% ✅ |
 | **4MiB** (`4MiB`) | **5272.41 MiB/s** (1318.1) | 3689.29 MiB/s (922.3) | 2307.65 MiB/s | **+42.9% ✅** | +128.5% ✅ | 65.2 ms | 128.5 ms | -49.3% ✅ |
 | **8MiB** (`4MiB`) | **5591.96 MiB/s** (699.0) | 3997.97 MiB/s (499.8) | 2298.86 MiB/s | **+39.9% ✅** | +143.2% ✅ | 116.3 ms | 241.0 ms | -51.7% ✅ |
-| 16MiB (`4MiB`) | *待运行...* | 4112.13 MiB/s | 3006.16 MiB/s | — | — | — | 688.3 ms | — |
+| **16MiB** (`4MiB`) | **6424.71 MiB/s** (401.5) | 4112.13 MiB/s (257.0) | 3006.16 MiB/s | **+56.2% ✅** | +113.7% ✅ | 187.5 ms | 688.3 ms | -72.8% ✅ |
 | 32MiB (`4MiB`) | *待运行...* | 3227.03 MiB/s | 2797.87 MiB/s | — | — | — | 1140.0 ms | — |
 | 64MiB (`4MiB`) | *待运行...* | 2690.95 MiB/s | 2465.47 MiB/s | — | — | — | 2420.0 ms | — |
 
