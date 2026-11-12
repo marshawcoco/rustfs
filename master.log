@@ -43,3 +43,6 @@
 2026-11-12T07:17:54Z SLEEP 60s before next round
 2026-11-12T07:18:54Z START round=15/27 method=put size=8MiB concurrency=64 duration=5m
 2026-11-12T07:34:47Z END round=15/27 method=put size=8MiB rc=0 elapsed=953s parsed=ok
+2026-11-12T07:34:54Z SLEEP 60s before next round
+2026-11-12T07:35:54Z START round=16/27 method=put size=16MiB concurrency=64 duration=5m
+2026-11-12T07:47:30Z END round=16/27 method=put size=16MiB rc=0 elapsed=696s parsed=ok
