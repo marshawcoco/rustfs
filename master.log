@@ -10,3 +10,6 @@
 2026-11-12T03:44:42Z SLEEP 60s before next round
 2026-11-12T03:45:42Z START round=4/27 method=get size=1MiB concurrency=64 duration=5m
 2026-11-12T03:51:10Z END round=4/27 method=get size=1MiB rc=0 elapsed=328s parsed=ok
+2026-11-12T03:51:15Z SLEEP 60s before next round
+2026-11-12T03:52:15Z START round=5/27 method=get size=4MiB concurrency=64 duration=5m
+2026-11-12T03:57:46Z END round=5/27 method=get size=4MiB rc=0 elapsed=331s parsed=ok
