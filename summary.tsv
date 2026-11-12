@@ -2,3 +2,4 @@ method	size	throughput	obj_per_s	req_avg	req_p50	req_p90	req_p99	ttfb_avg	ttfb_p
 get	1KiB	7.30 MiB/s	7477.28	8.5ms	8.3ms	10.6ms	13.4ms	9ms	13ms	254ms
 get	4KiB	29.54 MiB/s	7562.30	8.4ms	8.3ms	10.3ms	12.9ms	8ms	13ms	100ms
 get	16KiB	116.85 MiB/s	7478.17	8.5ms	8.4ms	10.4ms	12.6ms	9ms	13ms	79ms
+get	128KiB	864.32 MiB/s	6914.53	9.3ms	9.1ms	11.3ms	14.0ms	9ms	14ms	54ms
