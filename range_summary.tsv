@@ -3,3 +3,4 @@ suiteA_12plus4	minio	12+4	1MiB_minio	4KiB	15.28 MiB/s	3911.60	16.4ms	15.5ms	22.6
 suiteA_12plus4	minio	12+4	1MiB_minio	16KiB	61.25 MiB/s	3920.11	16.4ms	15.5ms	22.8ms	34.5ms	16ms	34ms	62ms
 suiteA_12plus4	minio	12+4	1MiB_minio	32KiB	122.39 MiB/s	3916.61	16.5ms	15.6ms	22.9ms	34.6ms	16ms	35ms	154ms
 suiteA_12plus4	minio	12+4	1MiB_minio	64KiB	241.32 MiB/s	3861.06	16.7ms	15.8ms	23.1ms	34.7ms	17ms	34ms	59ms
+suiteA_12plus4	minio	12+4	1MiB_minio	128KiB	471.39 MiB/s	3771.10	17.1ms	16.2ms	23.6ms	35.8ms	17ms	35ms	62ms
