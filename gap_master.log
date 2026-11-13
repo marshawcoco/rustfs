@@ -66,3 +66,6 @@ PARSED_OK suiteA_12plus4 dyn64k 8MiB -> 5332.38 MiB/s (666.55 req/s, P50=94.9ms,
 2026-11-13T16:41:29Z ROUND_START suite=suiteA_12plus4 series=dyn256k ec=12+4 block=256KiB_dyn range=1MiB
 2026-11-13T16:42:18Z ROUND_END suite=suiteA_12plus4 series=dyn256k range=1MiB rc=0
 PARSED_OK suiteA_12plus4 dyn256k 1MiB -> 2358.96 MiB/s (2358.96 req/s, P50=26.9ms, P99=39.9ms)
+2026-11-13T16:42:30Z ROUND_START suite=suiteA_12plus4 series=dyn256k ec=12+4 block=256KiB_dyn range=2MiB
+2026-11-13T16:43:18Z ROUND_END suite=suiteA_12plus4 series=dyn256k range=2MiB rc=0
+PARSED_OK suiteA_12plus4 dyn256k 2MiB -> 3512.15 MiB/s (1756.08 req/s, P50=36.2ms, P99=53.4ms)
