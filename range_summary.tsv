@@ -20,3 +20,4 @@ suiteA_12plus4	dyn256k	12+4	256KiB_dyn	8MiB	5097.63 MiB/s	637.20	100.7ms	100.8ms
 suiteB_8plus8_quantum	dyn64k_pr3_fixed	8+8	64KiB_q4K_fixed	4KiB	21.17 MiB/s	5419.46	11.8ms	11.7ms	14.4ms	17.3ms	12ms	17ms	98ms
 suiteB_8plus8_quantum	dyn64k_pr3_fixed	8+8	64KiB_q4K_fixed	16KiB	76.64 MiB/s	4904.84	13.1ms	12.9ms	15.8ms	18.7ms	13ms	18ms	41ms
 suiteB_8plus8_quantum	dyn64k_pr3_fixed	8+8	64KiB_q4K_fixed	32KiB	136.35 MiB/s	4363.27	14.7ms	14.5ms	17.9ms	21.3ms	14ms	19ms	41ms
+suiteB_8plus8_quantum	dyn64k_pr3_fixed	8+8	64KiB_q4K_fixed	64KiB	225.88 MiB/s	3614.15	17.8ms	17.6ms	21.2ms	24.7ms	15ms	21ms	32ms
