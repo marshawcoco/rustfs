@@ -1,12 +1,12 @@
 # Aliyun `ecs.i5` 同硬件全尺寸对决报告：`RustFS Dynamic` vs `MinIO` (最新正式版) + 全尺寸 `Range GET`
 
-- **自动更新时间**: `2026-11-13 16:27:08 UTC`
+- **自动更新时间**: `2026-11-13 16:28:08 UTC`
 - **同构硬件规格 (`cn-hangzhou-j`)**: `4 × ecs.i5.16xlarge` 存储节点（Hypervisor 塑形 `6` 颗独占 Xeon 6 `6982P-C @ 3.9GHz` 物理核 + Cgroup `MemoryMax=12GiB` + 每节点 `4 × 3.5TB` PCIe 5.0 本地 NVMe SSD Pro 共 `16` 盘 XFS + `163.84 Gbps` 网络）+ `1 × ecs.i5.16xlarge` (`64 vCPU`, `163.84 Gbps`) 客户端节点
 - **被测版本**:
   - **MinIO 最新正式版**: `RELEASE.2025-10-15T17-29-55Z` (`9e49d5e7a648`, 16 盘默认 `EC:4` 即 `12+4`)
   - **RustFS Dynamic (PR #3 修复版)**: `fix/wide-stripe-quantized-range-read` (`1fbd48a39`, 开启全部 4 项 `RUSTFS_EC_*` 开关)
   - **同硬件参照归档**: `RustFS Dynamic` (`Cluster 2`), `RustFS Non-Dynamic` (`Cluster 1`), `RustFS 1.0.5-preview.1` (`34e6449ed`)
-- **当前已完成进度**: MinIO 整对象 `30 / 30` 轮 · 本次新增冷盘 Range `1 / 28` 轮
+- **当前已完成进度**: MinIO 整对象 `30 / 30` 轮 · 本次新增冷盘 Range `2 / 28` 轮
 
 ---
 
@@ -60,7 +60,7 @@
 | Range 大小 | RustFS `Dyn 64KiB` | RustFS `Dyn 256KiB` | RustFS `1.0.5-p1` (`≤1M` 已测) | MinIO 最新版 (`12+4`) | `Dyn 64K` vs MinIO | `Dyn 64K` P99 | MinIO P99 |
 |---|---|---|---|---|---|---|---|
 | **4KiB** | **14.02 MiB/s** (3590.08/s) | 13.63 MiB/s (3488.76/s) | 10.85 MiB/s (2777.57/s) | **15.28 MiB/s** (3911.60/s) | **-8.2%** | 25.8ms | 34.3ms |
-| **16KiB** | **55.71 MiB/s** (3565.21/s) | 54.28 MiB/s (3473.73/s) | 44.90 MiB/s (2873.85/s) | *(待跑)* | **-** | 26.0ms | - |
+| **16KiB** | **55.71 MiB/s** (3565.21/s) | 54.28 MiB/s (3473.73/s) | 44.90 MiB/s (2873.85/s) | **61.25 MiB/s** (3920.11/s) | **-9.0%** | 26.0ms | 34.5ms |
 | **32KiB** | **110.65 MiB/s** (3540.81/s) | 107.67 MiB/s (3445.37/s) | 91.08 MiB/s (2914.46/s) | *(待跑)* | **-** | 26.0ms | - |
 | **64KiB** | **218.43 MiB/s** (3494.86/s) | 212.05 MiB/s (3392.83/s) | 185.45 MiB/s (2967.18/s) | *(待跑)* | **-** | 26.2ms | - |
 | **128KiB** | **423.62 MiB/s** (3388.93/s) | 411.57 MiB/s (3292.54/s) | 365.47 MiB/s (2923.73/s) | *(待跑)* | **-** | 27.3ms | - |
