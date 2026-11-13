@@ -5,3 +5,4 @@ get	16KiB	147.95 MiB/s	9468.71	6.7ms	6.0ms	9.9ms	16.7ms	7ms	17ms	57ms
 get	128KiB	935.66 MiB/s	7485.29	8.5ms	7.7ms	13.0ms	20.9ms	8ms	21ms	45ms
 get	1MiB	3905.35 MiB/s	3905.35	16.5ms	15.4ms	24.7ms	34.0ms	15ms	32ms	212ms
 get	4MiB	7767.41 MiB/s	1941.85	33.0ms	33.0ms	38.5ms	45.3ms	20ms	32ms	55ms
+get	8MiB	8785.97 MiB/s	1098.25	58.2ms	59.5ms	64.6ms	70.5ms	22ms	33ms	260ms
