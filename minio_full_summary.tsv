@@ -10,3 +10,4 @@ get	16MiB	9500.42 MiB/s	593.78	107.5ms	112.2ms	117.4ms	123.1ms	21ms	33ms	54ms
 get	32MiB	9612.00 MiB/s	300.37	212.3ms	220.0ms	232.4ms	245.6ms	24ms	39ms	65ms
 get	64MiB	9597.50 MiB/s	149.96	423.0ms	425.2ms	444.2ms	463.8ms	25ms	41ms	67ms
 put	1KiB	1.62 MiB/s	1655.88	40.8ms	5.0ms	183.4ms	339.3ms	41ms	339ms	435ms
+put	4KiB	6.65 MiB/s	1702.39	38.4ms	5.1ms	171.1ms	338.6ms	38ms	339ms	428ms
