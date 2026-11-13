@@ -96,3 +96,6 @@ PARSED_OK suiteB_8plus8_quantum 105p1 128KiB -> 406.09 MiB/s (3248.75 req/s, P50
 2026-11-13T01:21:45Z ROUND_START suite=suiteB_8plus8_quantum series=105p1 ec=8+8 block=1MiB_fixed range=256KiB
 2026-11-13T01:22:34Z ROUND_END suite=suiteB_8plus8_quantum series=105p1 range=256KiB rc=0
 PARSED_OK suiteB_8plus8_quantum 105p1 256KiB -> 776.01 MiB/s (3104.02 req/s, P50=20.5ms, P99=29.4ms)
+2026-11-13T01:22:42Z ROUND_START suite=suiteB_8plus8_quantum series=105p1 ec=8+8 block=1MiB_fixed range=1MiB
+2026-11-13T01:23:31Z ROUND_END suite=suiteB_8plus8_quantum series=105p1 range=1MiB rc=0
+PARSED_OK suiteB_8plus8_quantum 105p1 1MiB -> 2333.81 MiB/s (2333.81 req/s, P50=27.2ms, P99=40.5ms)
