@@ -13,3 +13,4 @@ suiteA_12plus4	dyn64k	12+4	64KiB_dyn	1MiB	2364.98 MiB/s	2364.98	27.1ms	26.8ms	33
 suiteA_12plus4	dyn64k	12+4	64KiB_dyn	2MiB	3717.48 MiB/s	1858.74	34.5ms	34.3ms	41.7ms	49.0ms	24ms	37ms	177ms
 suiteA_12plus4	dyn64k	12+4	64KiB_dyn	4MiB	5121.53 MiB/s	1280.38	50.1ms	49.6ms	60.0ms	74.6ms	26ms	40ms	72ms
 suiteA_12plus4	dyn64k	12+4	64KiB_dyn	8MiB	5332.38 MiB/s	666.55	96.2ms	94.9ms	117.1ms	145.4ms	31ms	48ms	97ms
+suiteA_12plus4	dyn256k	12+4	256KiB_dyn	1MiB	2358.96 MiB/s	2358.96	27.2ms	26.9ms	33.4ms	39.9ms	24ms	36ms	62ms

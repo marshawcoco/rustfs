@@ -58,3 +58,11 @@ PARSED_OK suiteA_12plus4 dyn64k 4MiB -> 5121.53 MiB/s (1280.38 req/s, P50=49.6ms
 2026-11-13T16:39:51Z ROUND_START suite=suiteA_12plus4 series=dyn64k ec=12+4 block=64KiB_dyn range=8MiB
 2026-11-13T16:40:40Z ROUND_END suite=suiteA_12plus4 series=dyn64k range=8MiB rc=0
 PARSED_OK suiteA_12plus4 dyn64k 8MiB -> 5332.38 MiB/s (666.55 req/s, P50=94.9ms, P99=145.4ms)
+2026-11-13T16:40:48Z RESET_CLUSTER engine=rustfs-dyn storage_class=default(EC:4/12+4)
+2026-11-13T16:41:00Z RUSTFS_CLUSTER_HEALTHY_ALL_4_NODES
+2026-11-13T16:41:00Z SEED_START suite=suiteA_12plus4 series=dyn256k engine=rustfs-dyn objects=3200x16MiB
+[VERIFY] mode=dyn256k bucket=warp-range-bucket found_objects=3200
+[VERIFY_OK] mode=dyn256k sampled=5/5 exact layout & 4KiB+8MiB 206 Range GET verified!
+2026-11-13T16:41:29Z ROUND_START suite=suiteA_12plus4 series=dyn256k ec=12+4 block=256KiB_dyn range=1MiB
+2026-11-13T16:42:18Z ROUND_END suite=suiteA_12plus4 series=dyn256k range=1MiB rc=0
+PARSED_OK suiteA_12plus4 dyn256k 1MiB -> 2358.96 MiB/s (2358.96 req/s, P50=26.9ms, P99=39.9ms)
