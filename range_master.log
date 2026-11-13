@@ -74,3 +74,10 @@ PARSED_OK suiteA_12plus4 dyn64k 256KiB -> 807.52 MiB/s (3230.07 req/s, P50=19.6m
 2026-11-13T01:15:17Z ROUND_START suite=suiteA_12plus4 series=dyn64k ec=12+4 block=64KiB_dyn range=1MiB
 2026-11-13T01:16:05Z ROUND_END suite=suiteA_12plus4 series=dyn64k range=1MiB rc=0
 PARSED_OK suiteA_12plus4 dyn64k 1MiB -> 2481.17 MiB/s (2481.17 req/s, P50=25.5ms, P99=37.7ms)
+2026-11-13T01:16:11Z RESET_CLUSTER bin=105p1 storage_class=EC:8
+2026-11-13T01:16:22Z SEED_START suite=suiteB_8plus8_quantum series=105p1 objects=3200x16MiB (50GiB logical > 48GiB Cgroup RAM)
+[VERIFY] mode=105p1 bucket=warp-range-bucket found_objects=3200
+[VERIFY_OK] mode=105p1 sampled=5/5 exact block layout & 206 Range GET verified!
+2026-11-13T01:16:56Z ROUND_START suite=suiteB_8plus8_quantum series=105p1 ec=8+8 block=1MiB_fixed range=4KiB
+2026-11-13T01:17:45Z ROUND_END suite=suiteB_8plus8_quantum series=105p1 range=4KiB rc=0
+PARSED_OK suiteB_8plus8_quantum 105p1 4KiB -> 13.27 MiB/s (3397.94 req/s, P50=18.7ms, P99=27.0ms)
