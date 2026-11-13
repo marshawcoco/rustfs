@@ -1,1 +1,2 @@
 2026-11-13T15:14:41Z === [STEP 0] Initializing Live GitHub Branch & Ensuring PR #3 RustFS Binary is Built ===
+2026-11-13T15:37:00Z === [STEP 1] Bootstrapping 4 shaped i5 storage nodes (6 Xeon 6 cores + MemoryMax=12G + 4x3.5TB PCIe 5.0 NVMe) ===

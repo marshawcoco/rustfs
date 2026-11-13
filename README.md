@@ -1,6 +1,6 @@
 # Aliyun `ecs.i5` 同硬件全尺寸对决报告：`RustFS Dynamic` vs `MinIO` (最新正式版) + 全尺寸 `Range GET`
 
-- **自动更新时间**: `2026-11-13 15:14:41 UTC`
+- **自动更新时间**: `2026-11-13 15:37:14 UTC`
 - **同构硬件规格 (`cn-hangzhou-j`)**: `4 × ecs.i5.16xlarge` 存储节点（Hypervisor 塑形 `6` 颗独占 Xeon 6 `6982P-C @ 3.9GHz` 物理核 + Cgroup `MemoryMax=12GiB` + 每节点 `4 × 3.5TB` PCIe 5.0 本地 NVMe SSD Pro 共 `16` 盘 XFS + `163.84 Gbps` 网络）+ `1 × ecs.i5.16xlarge` (`64 vCPU`, `163.84 Gbps`) 客户端节点
 - **被测版本**:
   - **MinIO 最新正式版**: `RELEASE.2025-10-15T17-29-55Z` (`9e49d5e7a648`, 16 盘默认 `EC:4` 即 `12+4`)
