@@ -9,3 +9,4 @@ suiteA_12plus4	105p1	12+4	1MiB_fixed	1MiB	2207.20 MiB/s	2207.20	29.1ms	28.7ms	36
 suiteA_12plus4	dyn256k	12+4	256KiB_dyn	4KiB	13.63 MiB/s	3488.76	18.4ms	18.2ms	22.3ms	26.6ms	18ms	27ms	44ms
 suiteA_12plus4	dyn256k	12+4	256KiB_dyn	16KiB	54.28 MiB/s	3473.73	18.5ms	18.3ms	22.4ms	26.7ms	18ms	27ms	46ms
 suiteA_12plus4	dyn256k	12+4	256KiB_dyn	32KiB	107.67 MiB/s	3445.37	18.6ms	18.4ms	22.5ms	27.0ms	19ms	27ms	43ms
+suiteA_12plus4	dyn256k	12+4	256KiB_dyn	64KiB	212.05 MiB/s	3392.83	18.9ms	18.7ms	22.9ms	27.6ms	19ms	27ms	128ms
