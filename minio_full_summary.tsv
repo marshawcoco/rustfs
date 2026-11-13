@@ -19,3 +19,4 @@ put	8MiB	3457.99 MiB/s	432.25	144.7ms	142.2ms	179.2ms	222.6ms	73ms	124ms	369ms
 put	16MiB	4128.29 MiB/s	258.02	246.4ms	249.2ms	303.1ms	369.3ms	91ms	162ms	290ms
 put	32MiB	3299.85 MiB/s	103.12	620.2ms	587.2ms	829.8ms	1014.6ms	363ms	741ms	910ms
 put	64MiB	2697.35 MiB/s	42.15	1481.1ms	1468.6ms	1828.0ms	2234.7ms	853ms	1.479s	2.357s
+mixed	1KiB	2.75 MiB/s	4696.26	2.2ms	80.0ms
