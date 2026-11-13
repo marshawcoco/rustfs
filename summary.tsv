@@ -1,1 +1,2 @@
 suite	series	ec_geometry	block_layout	range_size	throughput	req_per_s	req_avg	req_p50	req_p90	req_p99	ttfb_avg	ttfb_p99	ttfb_worst
+suiteA_12plus4	105p1	12+4	1MiB_fixed	4KiB	10.85 MiB/s	2777.57	23.0ms	21.6ms	27.1ms	33.8ms	22ms	34ms	4.709s
