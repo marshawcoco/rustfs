@@ -93,3 +93,6 @@ PARSED_OK suiteB_8plus8_quantum dyn64k_pr3_fixed 32KiB -> 136.35 MiB/s (4363.27 
 2026-11-13T16:49:13Z ROUND_START suite=suiteB_8plus8_quantum series=dyn64k_pr3_fixed ec=8+8 block=64KiB_q4K_fixed range=64KiB
 2026-11-13T16:50:02Z ROUND_END suite=suiteB_8plus8_quantum series=dyn64k_pr3_fixed range=64KiB rc=0
 PARSED_OK suiteB_8plus8_quantum dyn64k_pr3_fixed 64KiB -> 225.88 MiB/s (3614.15 req/s, P50=17.6ms, P99=24.7ms)
+2026-11-13T16:50:13Z ROUND_START suite=suiteB_8plus8_quantum series=dyn64k_pr3_fixed ec=8+8 block=64KiB_q4K_fixed range=128KiB
+2026-11-13T16:51:02Z ROUND_END suite=suiteB_8plus8_quantum series=dyn64k_pr3_fixed range=128KiB rc=0
+PARSED_OK suiteB_8plus8_quantum dyn64k_pr3_fixed 128KiB -> 451.89 MiB/s (3615.11 req/s, P50=17.6ms, P99=25.5ms)
