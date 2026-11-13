@@ -1,3 +1,4 @@
 suite	series	ec_geometry	block_layout	range_size	throughput	req_per_s	req_avg	req_p50	req_p90	req_p99	ttfb_avg	ttfb_p99	ttfb_worst
 suiteA_12plus4	minio	12+4	1MiB_minio	4KiB	15.28 MiB/s	3911.60	16.4ms	15.5ms	22.6ms	34.3ms	16ms	34ms	60ms
 suiteA_12plus4	minio	12+4	1MiB_minio	16KiB	61.25 MiB/s	3920.11	16.4ms	15.5ms	22.8ms	34.5ms	16ms	34ms	62ms
+suiteA_12plus4	minio	12+4	1MiB_minio	32KiB	122.39 MiB/s	3916.61	16.5ms	15.6ms	22.9ms	34.6ms	16ms	35ms	154ms
