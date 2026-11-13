@@ -1,2 +1,6 @@
 2026-11-13T15:14:41Z === [STEP 0] Initializing Live GitHub Branch & Ensuring PR #3 RustFS Binary is Built ===
 2026-11-13T15:37:00Z === [STEP 1] Bootstrapping 4 shaped i5 storage nodes (6 Xeon 6 cores + MemoryMax=12G + 4x3.5TB PCIe 5.0 NVMe) ===
+2026-11-13T15:37:19Z === [PART 1/4] Starting MinIO Full-Object 30 Rounds (GET/PUT/MIXED x 1KiB..64MiB, 60s/round) ===
+2026-11-13T15:37:19Z RESET_CLUSTER engine=minio storage_class=default(EC:4/12+4)
+2026-11-13T15:37:26Z MINIO_CLUSTER_HEALTHY_ALL_4_NODES
+2026-11-13T16:25:40Z === [PART 1/4] MinIO Full-Object 30 Rounds Finished rc=0 ===
