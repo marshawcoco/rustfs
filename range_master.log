@@ -124,3 +124,5 @@ PARSED_OK suiteB_8plus8_quantum dyn64k 256KiB -> 854.17 MiB/s (3416.68 req/s, P5
 2026-11-13T01:30:18Z ROUND_START suite=suiteB_8plus8_quantum series=dyn64k ec=8+8 block=64KiB_q4K range=1MiB
 2026-11-13T01:31:07Z ROUND_END suite=suiteB_8plus8_quantum series=dyn64k range=1MiB rc=0
 PARSED_OK suiteB_8plus8_quantum dyn64k 1MiB -> 2609.25 MiB/s (2609.25 req/s, P50=24.3ms, P99=36.0ms)
+2026-11-13T01:31:14Z ALL_RANGE_SUITES_COMPLETED_ZERO_ERRORS
+2026-11-13T01:31:14Z FINAL_SYNC_BEFORE_DESTRUCT
