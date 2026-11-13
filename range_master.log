@@ -6,3 +6,6 @@
 2026-11-13T00:55:00Z ROUND_START suite=suiteA_12plus4 series=105p1 ec=12+4 block=1MiB_fixed range=4KiB
 2026-11-13T00:55:48Z ROUND_END suite=suiteA_12plus4 series=105p1 range=4KiB rc=0
 PARSED_OK suiteA_12plus4 105p1 4KiB -> 10.85 MiB/s (2777.57 req/s, P50=21.6ms, P99=33.8ms)
+2026-11-13T00:55:57Z ROUND_START suite=suiteA_12plus4 series=105p1 ec=12+4 block=1MiB_fixed range=16KiB
+2026-11-13T00:56:45Z ROUND_END suite=suiteA_12plus4 series=105p1 range=16KiB rc=0
+PARSED_OK suiteA_12plus4 105p1 16KiB -> 44.90 MiB/s (2873.85 req/s, P50=21.8ms, P99=34.5ms)
